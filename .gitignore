@@ -1,0 +1,20 @@
+# Godot 4 generated cache (rebuilt automatically on open)
+.godot/
+
+# Web export output (rebuild from the editor; don't commit the 30 MB wasm)
+build/
+export/
+web/
+
+# Export credentials (can contain signing keys/passwords)
+export_credentials.cfg
+
+# Packaged zips
+*.zip
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.tmp
+.vscode/
+.idea/
