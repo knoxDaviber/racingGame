@@ -1,0 +1,11 @@
+Model Information:
+* title:	Purple Cop Car
+* source:	https://sketchfab.com/3d-models/purple-cop-car-259e6828475440d399b2e83a7bb09c33
+* author:	tasaanarovec (https://sketchfab.com/tasaanarovec)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Purple Cop Car" (https://sketchfab.com/3d-models/purple-cop-car-259e6828475440d399b2e83a7bb09c33) by tasaanarovec (https://sketchfab.com/tasaanarovec) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

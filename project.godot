@@ -16,7 +16,7 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 config/name="Cops and Robbers Racer"
 config/version="0.1"
-run/main_scene="res://main.tscn"
+run/main_scene="uid://cga7filj6j7h0"
 config/features=PackedStringArray("4.7")
 
 [display]
@@ -30,6 +30,11 @@ window/size/viewport_height=720
 
 [rendering]
 
+textures/canvas_textures/default_texture_filter=0
+textures/canvas_textures/default_texture_repeat=1
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
+textures/vram_compression/import_s3tc_bptc=true
+textures/webp_compression/compression_method=0
+textures/webp_compression/lossless_compression_factor=0.0
 environment/defaults/default_clear_color=Color(0.35, 0.45, 0.6, 1)

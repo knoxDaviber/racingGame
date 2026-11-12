@@ -10,6 +10,11 @@ const WHEEL_X: float = 0.85
 const WHEEL_Z: float = 1.35
 const WHEELBASE: float = 2.7
 
+# --- hitbox: two boxes (the car body + the cabin). The 3D model is scaled to fit HITBOX_BASE's length.
+const HITBOX_BASE: Vector3 = Vector3(1.8, 0.5, 4.2)
+const HITBOX_CABIN: Vector3 = Vector3(1.5, 0.5, 2.0)
+const CarModel = preload("res://car_model.gd")   # hooks a real 3D model onto this rig (falls back to boxes)
+
 # --- handling tunables (v0.1) ---
 const MASS: float = 800.0
 const GRIP_FRONT: float = 2.3          # tyre grip multipliers (higher = more cornering force)
@@ -50,6 +55,7 @@ var in_handbrake: bool = false
 
 var wheels: Array = []
 var visual: Node3D
+var model = null                # CarModel when a real 3D model is in use, null for the box car
 var siren_t: float = 0.0
 var siren_lights: Array = []
 var siren_mats: Array = []
@@ -87,13 +93,13 @@ func _ready() -> void:
 
 	var col := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(1.8, 0.5, 4.2)
+	box.size = HITBOX_BASE
 	col.shape = box
 	col.position = Vector3(0, 0.1, 0)
 	add_child(col)
 	var col2 := CollisionShape3D.new()
 	var box2 := BoxShape3D.new()
-	box2.size = Vector3(1.5, 0.5, 2.0)
+	box2.size = HITBOX_CABIN
 	col2.shape = box2
 	col2.position = Vector3(0, 0.6, 0.35)
 	add_child(col2)
@@ -119,6 +125,8 @@ func _add_wheel(pos: Vector3) -> VehicleWheel3D:
 	w.wheel_friction_slip = 1.5
 	w.use_as_traction = true
 	add_child(w)
+	if model != null:
+		return w   # the model's own wheels copy this wheel's motion (car_model.gd)
 
 	var mi := MeshInstance3D.new()
 	var cm := CylinderMesh.new()
@@ -175,6 +183,11 @@ func _glow(color: Color, energy: float) -> StandardMaterial3D:
 func _build_visual() -> void:
 	visual = Node3D.new()
 	add_child(visual)
+	# A real 3D model if one is set up (see car_model.gd); otherwise fall through to the box car below.
+	model = CarModel.new()
+	if model.attach(visual, is_cop, driver_name, body_color, HITBOX_BASE.z):
+		return
+	model = null
 	var glass: StandardMaterial3D = _paint(Color(0.05, 0.07, 0.1), 0.8, 0.1)
 	if is_cop:
 		_box(Vector3(1.8, 0.5, 4.2), Vector3(0, 0.1, 0), _paint(Color(0.93, 0.93, 0.95), 0.4, 0.35))
@@ -349,6 +362,9 @@ func _yaw_assist(delta: float, fspeed: float) -> void:
 func _animate_siren(delta: float) -> void:
 	siren_t += delta
 	var phase: bool = int(siren_t * 7.0) % 2 == 0
+	if model != null:
+		model.set_siren(phase)
+		return
 	siren_mats[0].emission_energy_multiplier = 4.0 if phase else 0.2
 	siren_mats[1].emission_energy_multiplier = 0.2 if phase else 4.0
 	siren_lights[0].light_energy = 3.0 if phase else 0.0
@@ -356,7 +372,14 @@ func _animate_siren(delta: float) -> void:
 
 
 # -------------------------------------------------------------- main update
+func _process(_delta: float) -> void:
+	if model != null:
+		model.sync_wheels(wheels)   # model wheels copy bounce / steer / spin of the physics wheels
+
+
 func _physics_process(delta: float) -> void:
+	if model != null:
+		model.physics_tick(self, wheels)
 	if track != null:
 		_set_idx(track.nearest_index(global_position, idx, 20))
 	if is_cop:
