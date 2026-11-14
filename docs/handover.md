@@ -8,12 +8,11 @@
 ## Done (2026-11-15, v0.2.1)
 - menu.gd: pause menu (ESC/P), how to play (auto on first launch), settings saved to user://settings.cfg.
 - main.gd: countdown tips, contextual tips (_update_tips), wrong-way warning, comfort toggles in _update_camera.
-- NOT run yet: no Godot on the Linux box. First thing next session: open in Godot, check for parse errors, try the menu.
+- Checked natively (menu, settings, HUD screenshots); web build re-exported. Godot: ~/Downloads/Godot, templates installed.
 
 ## Next
 - Human playtest: difficulty ramp (LEGS), shortcut feel, obstacle frequency, audio mix.
 - The AI still sometimes crashes at shortcut mouths or a city corner; the watchdog respawns it.
-- Re-export the web build (`browser/`) before pushing, since Pages deploys that folder.
 
 ## Open decisions
 - Engine sounds come from GGBot's pack: check its itch.io licence before publishing.
