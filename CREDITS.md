@@ -13,3 +13,8 @@ This work is based on "Purple Cop Car" (https://sketchfab.com/3d-models/purple-c
 Rotated upright and repositioned, wheels and siren lamps grouped into named nodes (done in Godot), front wheels copied from the
 rear wheels, materials converted from specular-glossiness to metallic-roughness using the original full-size textures
 (`paint_recolor.gdshader` recolours the racing car's red paint in game). The meshes themselves are unchanged.
+
+## Sounds (`Resources/Audio/`)
+- `engine_robber.ogg`, `engine_cop.ogg`: from "PSX Style Cars" by GGBot (https://ggbot.itch.io/), converted to mono.
+- `crash.ogg` (Impact Sounds) and `escaped.ogg` (Music Jingles): Kenney (www.kenney.nl), CC0.
+- `siren.ogg`, `skid.ogg`, `nitro.ogg`, `beep*.ogg`, `busted.ogg`: synthesized for this game (public domain).

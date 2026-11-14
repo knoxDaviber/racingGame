@@ -28,6 +28,24 @@ const DRIFT_SLIP_EXTRA: float = 0.8    # extra angle you can only reach by holdi
 const DRIFT_K: float = 4.5             # how quickly the slide angle converges (1/s)
 const DRIFT_ASSIST: float = 9.0
 
+# --- nitrous (everyone has it). A full tank is ~3 s of boost; it refills slowly, and fast while drifting.
+const NITRO_POWER: float = 1.9         # engine force multiplier while boosting
+const NITRO_TOP: float = 1.22          # top speed multiplier while boosting
+const NITRO_DRAIN: float = 0.33        # tank per second
+const NITRO_REFILL: float = 0.035      # tank per second, always
+const NITRO_DRIFT_REFILL: float = 0.3  # extra tank per second while sliding
+const SPIKE_TIME: float = 2.6          # seconds of shredded tyres after a spike strip
+
+const SND_ROBBER: AudioStream = preload("res://Resources/Audio/engine_robber.ogg")
+const SND_COP: AudioStream = preload("res://Resources/Audio/engine_cop.ogg")
+const SND_SIREN: AudioStream = preload("res://Resources/Audio/siren.ogg")
+const SND_SKID: AudioStream = preload("res://Resources/Audio/skid.ogg")
+const SND_NITRO: AudioStream = preload("res://Resources/Audio/nitro.ogg")
+const SND_CRASH: AudioStream = preload("res://Resources/Audio/crash.ogg")
+const AUDIO_RANGE: float = 140.0
+const VOL: float = -8.0               # master trim for every car sound (dB)       # beyond this from the camera a car's sounds are stopped, not just quiet
+const LIGHT_RANGE: float = 70.0        # siren lights further than this from the camera are switched off
+
 var track = null          # Track node (set by Main before add_child)
 var target_car = null     # who the AI chases (cops only)
 var is_cop: bool = false
@@ -77,6 +95,29 @@ var watch_prog: float = 0.0
 var log_events: bool = false
 var dbg: String = ""
 
+var nitro: float = 1.0          # tank 0..1
+var boosting: bool = false
+var in_nitro: bool = false
+var spiked_t: float = 0.0
+var on_dirt: bool = false
+var dodge: float = INF          # temporary AI lane (set by Main to steer round obstacles); INF = none
+var sc_plan: int = -1           # shortcut the AI has decided to take (-1 = none)
+var sc_decided: int = -1
+var night: bool = false
+var siren_on: bool = false      # set by Main: the one audible siren (nearest cop)
+var cam: Camera3D = null        # set by Main: used to cull sounds and lights far from the player
+
+var snd_engine: AudioStreamPlayer3D
+var snd_siren: AudioStreamPlayer3D
+var snd_skid: AudioStreamPlayer3D
+var snd_nitro: AudioStreamPlayer3D
+var snd_crash: AudioStreamPlayer3D
+var crash_cd: float = 0.0
+var prev_v: Vector3 = Vector3.ZERO
+var flames: Array = []
+var headlight: SpotLight3D = null
+var light_pool: MeshInstance3D = null
+
 
 func _ready() -> void:
 	mass = MASS
@@ -105,6 +146,7 @@ func _ready() -> void:
 	add_child(col2)
 
 	_build_visual()
+	_build_extras()
 	for sx in [-1.0, 1.0]:
 		for sz in [-1.0, 1.0]:
 			wheels.append(_add_wheel(Vector3(WHEEL_X * sx, 0.35, WHEEL_Z * sz)))
@@ -221,6 +263,158 @@ func _build_visual() -> void:
 		_box(Vector3(0.4, 0.14, 0.06), Vector3(0.6 * s, 0.2, 2.11), tail)
 
 
+## Sounds, nitrous flames and night lights. All hang off `visual`, whose front is -Z.
+func _build_extras() -> void:
+	snd_engine = _snd(SND_COP if is_cop else SND_ROBBER, 0.0, 10.0)
+	snd_skid = _snd(SND_SKID, -80.0, 6.0)
+	snd_nitro = _snd(SND_NITRO, -80.0, 6.0)
+	snd_crash = _snd(SND_CRASH, 0.0, 10.0)
+	if is_cop:
+		snd_siren = _snd(SND_SIREN, -80.0, 18.0)
+	# exhaust flames: unshaded additive cones, invisible until boosting (bloom makes them glow)
+	var fm := StandardMaterial3D.new()
+	fm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	fm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	fm.albedo_color = Color(0.35, 0.6, 1.6)
+	fm.cull_mode = BaseMaterial3D.CULL_DISABLED
+	for s in [-1.0, 1.0]:
+		var f := MeshInstance3D.new()
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.0
+		cm.bottom_radius = 0.16
+		cm.height = 1.0
+		cm.radial_segments = 6
+		cm.rings = 1
+		f.mesh = cm
+		f.material_override = fm
+		f.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		f.rotation_degrees = Vector3(-90, 0, 0)   # cone tip points backwards (+Z)
+		f.position = Vector3(0.42 * s, 0.05, 2.5)
+		f.visible = false
+		visual.add_child(f)
+		flames.append(f)
+	# fake headlights for everyone: a soft additive light pool on the road (no real light, no shadow)
+	var tex := GradientTexture2D.new()
+	tex.fill = GradientTexture2D.FILL_RADIAL
+	tex.fill_from = Vector2(0.5, 0.5)
+	tex.fill_to = Vector2(0.5, 0.0)
+	var g := Gradient.new()
+	g.set_color(0, Color(1, 0.95, 0.8, 1))
+	g.set_color(1, Color(0, 0, 0, 1))
+	tex.gradient = g
+	var pm := StandardMaterial3D.new()
+	pm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	pm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	pm.albedo_texture = tex
+	pm.albedo_color = Color(0.55, 0.52, 0.45)
+	pm.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	light_pool = MeshInstance3D.new()
+	var q := PlaneMesh.new()
+	q.size = Vector2(7.0, 13.0)
+	light_pool.mesh = q
+	light_pool.material_override = pm
+	light_pool.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	light_pool.position = Vector3(0, -0.12, -8.5)
+	light_pool.visible = false
+	visual.add_child(light_pool)
+
+
+func _snd(stream: AudioStream, db: float, unit: float) -> AudioStreamPlayer3D:
+	var p := AudioStreamPlayer3D.new()
+	p.stream = stream
+	p.volume_db = db + VOL
+	p.unit_size = unit
+	p.max_distance = AUDIO_RANGE
+	p.doppler_tracking = AudioStreamPlayer3D.DOPPLER_TRACKING_PHYSICS_STEP  # sirens bend as cops pass
+	if stream is AudioStreamOggVorbis:
+		(stream as AudioStreamOggVorbis).loop = stream != SND_CRASH
+	add_child(p)
+	return p
+
+
+## Night legs: everyone gets the fake light pool; only the player gets a real (shadowless) spotlight.
+func set_night(on: bool) -> void:
+	night = on
+	light_pool.visible = on
+	if is_player and on and headlight == null:
+		headlight = SpotLight3D.new()
+		headlight.spot_range = 55.0
+		headlight.spot_angle = 32.0
+		headlight.light_energy = 4.0
+		headlight.light_color = Color(1.0, 0.95, 0.85)
+		headlight.position = Vector3(0, 0.5, -2.3)
+		headlight.rotation_degrees = Vector3(-6, 0, 0)
+		visual.add_child(headlight)
+	if headlight != null:
+		headlight.visible = on
+
+
+func set_sounds(on: bool) -> void:
+	for p in [snd_engine, snd_skid, snd_nitro, snd_siren]:
+		if p == null:
+			continue
+		if on and not p.playing:
+			p.play(randf() * 2.0)
+		elif not on and p.playing:
+			p.stop()
+
+
+## Engine pitch follows speed; skid follows slide; siren only once the cop is rolling.
+## Everything stops beyond AUDIO_RANGE from the camera, so far cars cost nothing.
+func _update_audio(delta: float) -> void:
+	crash_cd = maxf(0.0, crash_cd - delta)
+	var dv: float = (linear_velocity - prev_v).length()
+	prev_v = linear_velocity
+	var near: bool = cam == null or cam.global_position.distance_squared_to(global_position) < AUDIO_RANGE * AUDIO_RANGE
+	set_sounds(near and visible)
+	if not near:
+		return
+	if dv > 5.0 and crash_cd <= 0.0 and not calibrating:
+		snd_crash.volume_db = VOL - 4.0 + linear_to_db(clampf(dv / 18.0, 0.15, 1.0))
+		snd_crash.pitch_scale = randf_range(0.8, 1.15)
+		snd_crash.play()
+		crash_cd = 0.35
+	var speed: float = linear_velocity.length()
+	var rpm: float = clampf(speed / top_speed, 0.0, 1.3)
+	snd_engine.pitch_scale = 0.55 + rpm * 1.25 + in_throttle * 0.12 + (0.15 if boosting else 0.0)
+	snd_engine.volume_db = VOL + lerpf(-16.0, -5.0, clampf(in_throttle * 0.6 + rpm * 0.5, 0.0, 1.0))
+	var slide: float = 0.0
+	if wheels_in_contact() >= 2 and speed > 8.0:
+		slide = clampf((absf(slip_angle()) - 0.12) / 0.35, 0.0, 1.0)
+		slide = maxf(slide, hb_amount * 0.8)
+	snd_skid.volume_db = VOL - 10.0 + linear_to_db(maxf(slide, 0.0001))
+	snd_skid.pitch_scale = 0.9 + speed / 160.0
+	snd_nitro.volume_db = VOL - 8.0 if boosting else -80.0
+	if snd_siren != null:   # only the cop Main picks as `siren_on` is heard: one siren, never a chorus
+		snd_siren.volume_db = VOL - 6.0 if controls_enabled and siren_on else -80.0
+
+
+func _update_nitro(delta: float, fspeed: float) -> void:
+	var sliding: bool = hb_amount > 0.4 or absf(slip_angle()) > 0.25
+	if sliding and absf(fspeed) > 10.0 and wheels_in_contact() >= 2:
+		nitro += NITRO_DRIFT_REFILL * delta
+	if boosting:
+		nitro -= NITRO_DRAIN * delta
+		if nitro <= 0.0 or not in_nitro or in_brake > 0.05:
+			boosting = false
+	else:
+		nitro += NITRO_REFILL * delta
+		boosting = in_nitro and nitro > 0.15 and in_brake < 0.05 and fspeed > 2.0
+	nitro = clampf(nitro, 0.0, 1.0)
+	for f in flames:
+		f.visible = boosting
+		if boosting:
+			f.scale = Vector3(1.0, randf_range(0.8, 1.6), 1.0)
+			f.position.z = 2.2 + f.scale.y * 0.5
+
+
+## Spike strip: tyres shredded for a while (less grip, much less top speed).
+func hit_spikes() -> void:
+	spiked_t = SPIKE_TIME
+	boosting = false
+	snd_crash.play()
+
+
 ## Tell the car which local axis is "forward". The front wheels steer, and the
 ## visual (headlights, cabin) is flipped to match.
 func set_forward(f: Vector3) -> void:
@@ -279,6 +473,7 @@ func set_ghost(on: bool) -> void:
 
 
 func respawn() -> void:
+	sc_plan = -1
 	var i: int = track.nearest_index(global_position, idx, 30)
 	_set_idx(i)
 	teleport(spawn_transform(track.points[i] + Vector3(0, 0.8, 0), track.tangents[i]))
@@ -319,6 +514,10 @@ func _apply_grip() -> void:
 		var grip: float = w.get_meta("grip", GRIP_FRONT)
 		if not w.use_as_steering:
 			grip *= lerpf(1.0, HANDBRAKE_REAR_GRIP, hb_amount)
+		if on_dirt:
+			grip *= track.SC_GRIP
+		if spiked_t > 0.0:
+			grip *= 0.7
 		w.wheel_friction_slip = grip
 
 
@@ -362,6 +561,16 @@ func _yaw_assist(delta: float, fspeed: float) -> void:
 func _animate_siren(delta: float) -> void:
 	siren_t += delta
 	var phase: bool = int(siren_t * 7.0) % 2 == 0
+	# far cops: lens glow only, the real lights stay off (the flashing glow reads the same at distance)
+	if cam != null and cam.global_position.distance_squared_to(global_position) > LIGHT_RANGE * LIGHT_RANGE:
+		if model != null:
+			model.set_siren(phase, false)
+			return
+		siren_mats[0].emission_energy_multiplier = 4.0 if phase else 0.2
+		siren_mats[1].emission_energy_multiplier = 0.2 if phase else 4.0
+		siren_lights[0].light_energy = 0.0
+		siren_lights[1].light_energy = 0.0
+		return
 	if model != null:
 		model.set_siren(phase)
 		return
@@ -381,7 +590,10 @@ func _physics_process(delta: float) -> void:
 	if model != null:
 		model.physics_tick(self, wheels)
 	if track != null:
-		_set_idx(track.nearest_index(global_position, idx, 20))
+		_set_idx(track.locate(global_position, idx))
+		on_dirt = track.last_on_shortcut
+	_update_audio(delta)
+	spiked_t = maxf(0.0, spiked_t - delta)
 	if is_cop:
 		_animate_siren(delta)
 	reset_cd = maxf(0.0, reset_cd - delta)
@@ -400,6 +612,8 @@ func _physics_process(delta: float) -> void:
 		brake = BRAKE_FORCE
 		steering = move_toward(steering, 0.0, 4.0 * delta)
 		_set_handbrake(false, delta)
+		boosting = false
+		_update_nitro(delta, 0.0)
 		return
 
 	var fspeed: float = forward_speed()
@@ -426,13 +640,15 @@ func _apply_controls(delta: float, fspeed: float) -> void:
 			eng = -REVERSE_FORCE * in_brake
 	elif in_throttle > 0.05 and fspeed < -1.5:
 		brk = BRAKE_FORCE * in_throttle
-	elif in_throttle > 0.05:
-		var fade: float = clampf(1.0 - pow(speed / top_speed, 2.0), 0.0, 1.0)
-		eng = ENGINE_FORCE * in_throttle * fade
+	elif in_throttle > 0.05 or boosting:
+		var top: float = top_speed * (NITRO_TOP if boosting else 1.0) * (0.55 if spiked_t > 0.0 else 1.0)
+		var fade: float = clampf(1.0 - pow(speed / top, 2.0), 0.0, 1.0)
+		eng = ENGINE_FORCE * (NITRO_POWER if boosting else maxf(in_throttle, 0.0)) * fade
 	else:
 		brk = 3.0  # rolling resistance / engine braking
 	engine_force = eng * engine_scale
 	brake = brk
+	_update_nitro(delta, fspeed)
 	_set_handbrake(in_handbrake, delta)
 	_yaw_assist(delta, fspeed)
 
@@ -456,6 +672,7 @@ func _read_player() -> void:
 	in_brake = 1.0 if down else 0.0
 	in_steer = (1.0 if left else 0.0) - (1.0 if right else 0.0)
 	in_handbrake = Input.is_physical_key_pressed(KEY_SPACE)
+	in_nitro = Input.is_physical_key_pressed(KEY_SHIFT)
 	if Input.is_physical_key_pressed(KEY_R) and reset_cd <= 0.0:
 		respawn()
 		reset_cd = 1.5
@@ -499,7 +716,34 @@ func _drive_ai(delta: float, fspeed: float) -> void:
 	var pos: Vector3 = global_position
 	var look_dist: float = 10.0 + speed * 0.8
 	var look_idx: int = (idx + int(look_dist / track.spacing) + 1) % track.count
-	var target: Vector3 = track.points[look_idx] + track.right_at(look_idx) * lane
+	var target: Vector3 = track.points[look_idx] + track.right_at(look_idx) * (dodge if dodge != INF else lane)
+
+	# Shortcuts: robbers decide once per approach (about 30% take it). Cops stick to the main road.
+	var sc: int = track.shortcut_near(idx, 8)
+	if sc < 0:
+		sc_decided = -1
+		sc_plan = -1
+	elif sc_decided != sc:
+		sc_decided = sc
+		sc_plan = sc if (not is_cop and randf() < 0.3) else -1
+	if sc_plan >= 0 and not on_dirt and idx > int(track.shortcuts[sc_plan]["a"]) + 4:
+		sc_plan = -1   # missed the mouth (or got reset onto the main road): stay on the main road
+	var on_sc: bool = sc_plan >= 0 and sc == sc_plan
+	if on_sc:
+		var p: PackedVector3Array = track.shortcuts[sc]["pts"]
+		var bk: int = 0
+		var bd: float = INF
+		for k in range(p.size()):
+			var d: float = p[k].distance_squared_to(pos)
+			if d < bd:
+				bd = d
+				bk = k
+		if idx < int(track.shortcuts[sc]["a"]) and not on_dirt:
+			target = p[2]   # line up on the mouth first; cutting across early hits the wall beside it
+		else:
+			var step: int = int(look_dist / 4.0) + 1
+			if bk + step < p.size():
+				target = p[bk + step]
 
 	# Close behind the target and roughly ahead of us on the track? Go straight at them.
 	var pursuing: bool = false
@@ -523,6 +767,8 @@ func _drive_ai(delta: float, fspeed: float) -> void:
 
 	# Speed: cruise target, capped by what the upcoming corners allow.
 	var limit: float = track.speed_limit_ahead(idx, 20.0 + speed * speed / 16.0, 8.0)
+	if on_sc and (on_dirt or idx >= int(track.shortcuts[sc]["a"]) - 3):
+		limit = minf(limit, track.SC_SPEED)   # brake at the mouth only: earlier, the cars behind queue up
 	var tgt: float = minf(ai_speed * pace, limit)
 	if pursuing:
 		tgt = minf(maxf(tgt, target_car.linear_velocity.length() + 3.0), limit * 1.1)
@@ -541,6 +787,18 @@ func _drive_ai(delta: float, fspeed: float) -> void:
 	if absf(alpha) > 0.9:
 		tgt = minf(tgt, 12.0)  # pointing the wrong way: slow down and sort it out
 
+	# Nitrous: only on a clear road ahead. Robbers use it to break away from a cop (or to catch up);
+	# cops only when well behind their target, so it closes the gap but never makes an arrest cheap.
+	var open_road: bool = limit > speed + 10.0 and absf(alpha) < 0.15 and not on_sc and dodge == INF
+	var want: bool = false
+	if is_cop:
+		want = target_car != null and (target_car.prog - prog) * track.spacing > 70.0
+	else:
+		want = pace > 1.02 or _cop_near(30.0)
+	in_nitro = open_road and want and (boosting or nitro > 0.5)
+	if boosting:
+		tgt = minf(tgt * NITRO_TOP, limit)
+
 	if speed < tgt - 1.0:
 		in_throttle = clampf((tgt - speed) / 4.0, 0.3, 1.0)
 		in_brake = 0.0
@@ -551,3 +809,10 @@ func _drive_ai(delta: float, fspeed: float) -> void:
 		in_throttle = 0.25
 		in_brake = 0.0
 	dbg = "tgt=%.1f limit=%.1f thr=%.2f brk=%.2f steer=%.2f" % [tgt, limit, in_throttle, in_brake, in_steer]
+
+
+func _cop_near(r: float) -> bool:
+	for o in get_tree().get_nodes_in_group("cars"):
+		if o.is_cop and o.global_position.distance_squared_to(global_position) < r * r:
+			return true
+	return false

@@ -1,25 +1,46 @@
 extends Node3D
-## Cops & Robbers racer v0.1: set-up, race flow, camera, FX and HUD.
+## Cops & Robbers racer v0.2: set-up, race flow, camera, FX and HUD.
 ##
-## You and three AI robbers race TOTAL_LAPS laps. Two cop cars hunt whichever
-## robber is closest. Every robber has an ARREST bar that fills while a cop is
-## near; a full bar = busted (out). Finish the laps first to escape.
+## One escape in four legs (track.gd MAPS), each harder than the last. You and three AI
+## robbers race each leg; cop cars hunt whichever robber is closest. Every robber has an
+## ARREST bar that fills while a cop is near; a full bar = busted (out for the rest of the run).
+## Finish the last leg to escape.
 
-const VERSION: String = "v0.1"
+const VERSION: String = "v0.2"
 
 const TrackScript = preload("res://track.gd")
 const CarScript = preload("res://car.gd")
 const MinimapScript = preload("res://minimap.gd")
 const SpeedFxScript = preload("res://speedfx.gd")
+const MenuScript = preload("res://menu.gd")
 
-const TOTAL_LAPS: int = 3
-const COP_COUNT: int = 2
+## Shown one at a time during each countdown.
+const TIPS: Array = [
+	"The red ARREST bar fills when a cop is close. Full bar = busted. Drive away from them!",
+	"Cops are the blue dots on the minimap (top right).",
+	"Hold SPACE while turning to drift. Drifting refills your nitro fast.",
+	"SHIFT = nitro boost. Use it on straights to get away from cops.",
+	"Yellow signs mark dirt shortcuts: shorter, but slippery.",
+	"Flipped over or stuck? Press R.",
+	"You don't need to win. Just finish the laps without getting busted.",
+	"Press ESC (or P) any time for the menu, settings and how to play.",
+]
+
 const COUNTDOWN_TIME: float = 3.0
-const COP_DELAY: float = 4.0     # seconds after GO before the cops start moving
-const ARREST_GRACE: float = 6.0  # no arrests this early in the race
-const COP_SPEED: float = 39.0
+const ARREST_GRACE: float = 6.0  # no arrests this early in a leg
+const ARREST_CARRY: float = 0.5  # share of each arrest bar carried into the next leg
 
-enum State { SETTLE, TEST, COUNTDOWN, RACING, BUSTED, ESCAPED, PTEST }
+## Difficulty per leg (same order as track.gd MAPS):
+## laps, cops, cop cruise speed, cop top speed, cop start delay (s), obstacle every (s, 0 = none), arrest fill rate
+const LEGS: Array = [
+	[2, 2, 39.0, 47.0, 4.0, 0.0, 30.0],
+	[2, 3, 39.5, 47.5, 3.5, 22.0, 31.0],
+	[2, 3, 40.5, 48.0, 3.0, 16.0, 33.0],
+	[2, 4, 41.5, 49.0, 2.5, 12.0, 35.0],
+]
+enum Obs { SPIKES, BARRICADE }
+
+enum State { SETTLE, TEST, COUNTDOWN, RACING, BUSTED, ESCAPED, PTEST, LEG_CLEAR }
 
 # name, colour, AI cruising speed (m/s), lane offset
 const ROBBERS: Array = [
@@ -31,7 +52,7 @@ const ROBBERS: Array = [
 const GRID: Array = [[1, -3.5], [1, 3.5], [3, -3.5], [3, 3.5]]
 const PLAYER_SLOT: int = 2
 const AI_SLOTS: Array = [0, 1, 3]
-const COP_GRID: Array = [[10, 2.5], [13, -2.5], [16, 2.5]]
+const COP_GRID: Array = [[10, 2.5], [13, -2.5], [16, 2.5], [19, -2.5]]
 
 var state: int = State.SETTLE
 var track = null
@@ -53,6 +74,22 @@ var target_t: float = 0.0
 var total_progress: float = 1.0
 var fwd_axis: Vector3 = Vector3(0, 0, -1)
 var engine_scale: float = 1.0
+
+var leg: int = 0
+var laps: int = 2
+var run_time: float = 0.0            # whole escape, all legs
+var leg_start_time: float = 0.0
+var leg_snapshot: Dictionary = {}    # racer -> [busted, arrest, slot] at the start of the leg (for retries)
+var obstacles: Array = []            # {node, prog, lat, kind, t0, hit: {}, warned}
+var obs_t: float = 0.0
+var obs_glow: StandardMaterial3D
+var env: Environment
+var sky_mat: ProceduralSkyMaterial
+var sun: DirectionalLight3D
+var wind: CPUParticles3D
+var sfx: Dictionary = {}
+var warn_t: float = 0.0
+var last_beep: int = -1
 
 # test / tuning hooks (headless only)
 var autotest: bool = false
@@ -85,6 +122,16 @@ var minimap: Control
 var bottom: VBoxContainer
 var hint: Label
 var fx: Control
+var nbar: ProgressBar
+var lbl_warn: Label
+var lbl_tip: Label
+var menu
+var tip_t: float = 0.0
+var tip_cd: Dictionary = {}        # tip id -> time it may show again
+var wrong_t: float = 0.0
+var stuck_t: float = 0.0
+var last_prog: float = 0.0
+var used_nitro: bool = false
 
 
 func _ready() -> void:
@@ -96,14 +143,12 @@ func _ready() -> void:
 	pt_speed = float(tune.get("ps", 25.0))
 	no_arrest = OS.get_cmdline_user_args().has("noarrest")
 	_build_world()
-	track = TrackScript.new()
-	add_child(track)
-	if tune.has("alat"):
-		track.a_lat = float(tune["alat"])
-	track.build()
-	total_progress = float(TOTAL_LAPS * track.count)
+	if tune.has("leg"):
+		leg = clampi(int(tune["leg"]), 0, LEGS.size() - 1)
+	_make_track()
 
 	player = _new_car(0, Color(1.0, 0.8, 0.05), 38.0, "YOU", GRID[PLAYER_SLOT][0], GRID[PLAYER_SLOT][1])
+	player.set_meta("slot", PLAYER_SLOT)
 	player.auto_drive = autotest
 	if tune.has("pspeed"):
 		player.ai_speed = float(tune["pspeed"])
@@ -111,45 +156,135 @@ func _ready() -> void:
 	racers.append(player)
 
 	cam = Camera3D.new()
-	cam.far = 1500.0
+	cam.far = 900.0     # depth fog is opaque well before this, so the cut-off is never seen
 	cam.fov = 68.0
+	cam.doppler_tracking = Camera3D.DOPPLER_TRACKING_PHYSICS_STEP
 	add_child(cam)
 	cam.current = true
+	player.cam = cam
+	_build_wind()
+	_build_sfx()
 
 	_build_hud()
+	menu = MenuScript.new()
+	add_child(menu)
+	menu.retry.connect(_restart)
+	menu.new_run.connect(func(): _goto_leg(0, true))
+	_apply_map()
 	lbl_msg.text = "WARMING UP"
 	lbl_sub.text = ""
 
 
 # ------------------------------------------------------------------- set-up
 func _build_world() -> void:
-	var env := Environment.new()
+	env = Environment.new()
 	env.background_mode = Environment.BG_SKY
 	var sky := Sky.new()
-	var sky_mat := ProceduralSkyMaterial.new()
-	sky_mat.sky_top_color = Color(0.12, 0.17, 0.38)
-	sky_mat.sky_horizon_color = Color(0.95, 0.6, 0.4)
-	sky_mat.ground_horizon_color = Color(0.95, 0.6, 0.4)
+	sky_mat = ProceduralSkyMaterial.new()
 	sky_mat.ground_bottom_color = Color(0.1, 0.12, 0.14)
 	sky.sky_material = sky_mat
 	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	env.ambient_light_energy = 0.8
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	# bloom only on things brighter than white (lamps, sirens, flames, windows): lights for free
+	env.glow_enabled = true
+	env.glow_intensity = 0.9
+	env.glow_bloom = 0.0
+	env.glow_hdr_threshold = 1.0
+	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
+	# depth fog: linear from fog_begin to just short of the far plane, so distant scenery fades out
 	env.fog_enabled = true
-	env.fog_light_color = Color(0.85, 0.6, 0.5)
-	env.fog_density = 0.0009
+	env.fog_mode = Environment.FOG_MODE_DEPTH
+	env.fog_depth_end = 860.0
+	env.fog_depth_curve = 1.4
+	env.fog_sky_affect = 0.3
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
 
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-28, -50, 0)
-	sun.light_color = Color(1.0, 0.82, 0.65)
-	sun.light_energy = 1.1
+	sun = DirectionalLight3D.new()
 	sun.shadow_enabled = true
-	sun.directional_shadow_max_distance = 140.0
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+	sun.directional_shadow_max_distance = 80.0   # only near shadows matter at speed
 	add_child(sun)
+
+
+## Sky, sun and fog for the current map; night legs switch car lights on and sun shadows off.
+func _apply_map() -> void:
+	var m: Dictionary = track.map
+	sky_mat.sky_top_color = m["sky_top"]
+	sky_mat.sky_horizon_color = m["sky_hor"]
+	sky_mat.ground_horizon_color = m["sky_hor"]
+	env.ambient_light_energy = m["ambient"]
+	env.fog_light_color = m["fog_col"]
+	env.fog_depth_begin = m["fog_begin"]
+	sun.rotation_degrees = m["sun_rot"]
+	sun.light_color = m["sun_col"]
+	sun.light_energy = m["sun_e"]
+	sun.shadow_enabled = not m["night"]
+	for c in racers + cops:
+		c.set_night(m["night"])
+
+
+func _make_track() -> void:
+	if track != null:
+		remove_child(track)   # out of the physics space right now, not at the end of the frame
+		track.queue_free()
+	track = TrackScript.new()
+	track.map = TrackScript.MAPS[leg]
+	if tune.has("alat"):
+		track.a_lat = float(tune["alat"])
+	add_child(track)
+	track.build()
+	laps = int(LEGS[leg][0])
+	total_progress = float(laps * track.count)
+	for c in racers + cops:
+		c.track = track
+	if minimap != null:
+		minimap.setup(track)
+
+
+## Wind streaks in 3D: a ring of thin boxes flying past the camera (in camera space) at speed.
+func _build_wind() -> void:
+	wind = CPUParticles3D.new()
+	wind.amount = 60
+	wind.lifetime = 0.7
+	wind.local_coords = true
+	wind.emission_shape = CPUParticles3D.EMISSION_SHAPE_RING
+	wind.emission_ring_axis = Vector3(0, 0, 1)
+	wind.emission_ring_radius = 11.0
+	wind.emission_ring_inner_radius = 5.0
+	wind.emission_ring_height = 2.0
+	wind.position = Vector3(0, 0, -40)
+	wind.direction = Vector3(0, 0, 1)
+	wind.spread = 0.0
+	wind.gravity = Vector3.ZERO
+	wind.initial_velocity_min = 70.0
+	wind.initial_velocity_max = 90.0
+	wind.particle_flag_align_y = true
+	var bm := BoxMesh.new()
+	bm.size = Vector3(0.03, 3.0, 0.03)
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.albedo_color = Color(1, 1, 1, 0.25)
+	bm.material = m
+	wind.mesh = bm
+	wind.emitting = false
+	cam.add_child(wind)
+
+
+func _build_sfx() -> void:
+	for n in ["beep", "beep_go", "busted", "escaped", "crash"]:
+		var p := AudioStreamPlayer.new()
+		p.stream = load("res://Resources/Audio/%s.ogg" % n)
+		p.volume_db = -12.0
+		add_child(p)
+		sfx[n] = p
+
+
+func _play(n: String) -> void:
+	sfx[n].play()
 
 
 ## kind: 0 = player, 1 = AI robber, 2 = cop.  back/lateral = starting grid slot.
@@ -168,6 +303,7 @@ func _new_car(kind: int, color: Color, ai_speed: float, car_name: String, back: 
 	car.fwd_local = fwd_axis
 	car.engine_scale = engine_scale
 	car.log_events = autotest
+	car.cam = cam
 	car.transform = _grid_transform(car, back, lateral)
 	_place_state(car, back)
 	add_child(car)
@@ -247,9 +383,27 @@ func _build_hud() -> void:
 	bar.add_theme_stylebox_override("fill", fill)
 	bar.add_theme_stylebox_override("background", back)
 	bottom.add_child(bar)
+	nbar = ProgressBar.new()
+	nbar.max_value = 1.0
+	nbar.show_percentage = false
+	nbar.custom_minimum_size = Vector2(460, 12)
+	var nfill := StyleBoxFlat.new()
+	nfill.bg_color = Color(0.3, 0.7, 1.0)
+	nbar.add_theme_stylebox_override("fill", nfill)
+	nbar.add_theme_stylebox_override("background", back)
+	bottom.add_child(nbar)
+
+	lbl_warn = _label(hud, 34, Color(1.0, 0.75, 0.2))
+	lbl_warn.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl_warn.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	hint = _label(hud, 17, Color(0.9, 0.9, 0.9))
-	hint.text = "W/S  gas / brake-reverse     A/D  steer     SPACE  handbrake drift     R  flip-reset"
+	hint.text = "W/S  gas / brake     A/D  steer     SPACE  drift (refills nitro)     SHIFT  nitro     R  reset     ESC  menu / help"
+
+	lbl_tip = _label(hud, 24, Color(0.55, 0.9, 1.0))
+	lbl_tip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl_tip.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	lbl_tip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	lbl_ver = _label(hud, 16, Color(0.8, 0.8, 0.8))
 	lbl_ver.text = "Cops & Robbers Racer " + VERSION
@@ -271,13 +425,19 @@ func _layout_hud() -> void:
 	fx.size = vp
 	minimap.position = Vector2(vp.x - minimap.custom_minimum_size.x - 16.0, 16.0)
 	bottom.size = Vector2(460, 0)
-	bottom.position = Vector2((vp.x - 460.0) * 0.5, vp.y - bottom.get_combined_minimum_size().y - 22.0)
+	bottom.position = Vector2((vp.x - 460.0) * 0.5, vp.y - bottom.get_combined_minimum_size().y - 44.0)
 	hint.position = Vector2(16.0, vp.y - hint.get_combined_minimum_size().y - 12.0)
 	lbl_ver.position = Vector2(vp.x - lbl_ver.get_combined_minimum_size().x - 16.0, vp.y - 30.0)
 	lbl_msg.size = Vector2(vp.x, 120.0)
 	lbl_msg.position = Vector2(0.0, vp.y * 0.36 - 60.0)
 	lbl_sub.size = Vector2(vp.x, 50.0)
 	lbl_sub.position = Vector2(0.0, vp.y * 0.36 + 70.0)
+	lbl_warn.size = Vector2(vp.x, 50.0)
+	lbl_warn.position = Vector2(0.0, vp.y * 0.16)
+	lbl_tip.size = Vector2(minf(vp.x - 40.0, 900.0), 70.0)
+	lbl_tip.position = Vector2((vp.x - lbl_tip.size.x) * 0.5, vp.y * 0.36 + 120.0)
+	hint.visible = menu.cfg["controls"]
+	minimap.visible = menu.cfg["minimap"]
 
 
 func _time_str(t: float) -> String:
@@ -305,8 +465,8 @@ func _standings() -> Array:
 
 
 func _update_hud() -> void:
-	var lap: int = clampi(int(floorf(player.prog / float(track.count))) + 1, 1, TOTAL_LAPS)
-	lbl_lap.text = "LAP %d / %d" % [lap, TOTAL_LAPS]
+	var lap: int = clampi(int(floorf(player.prog / float(track.count))) + 1, 1, laps)
+	lbl_lap.text = "LEG %d/%d  %s   LAP %d/%d" % [leg + 1, LEGS.size(), track.map["name"], lap, laps]
 	var order: Array = _standings()
 	lbl_pos.text = "POSITION  %d / %d" % [order.find(player) + 1, order.size()]
 	lbl_time.text = "TIME  " + _time_str(race_time)
@@ -322,14 +482,26 @@ func _update_hud() -> void:
 			tag = "  ESCAPED"
 		board += "%d. %s%s\n" % [i + 1, r.driver_name, tag]
 	lbl_board.text = board.strip_edges()
-	lbl_speed.text = "%d km/h" % int(absf(player.forward_speed()) * 3.6)
+	var kmh: float = absf(player.forward_speed()) * 3.6
+	lbl_speed.text = ("%d mph" % int(kmh * 0.621)) if menu.cfg["mph"] else ("%d km/h" % int(kmh))
 	bar.value = player.arrest
+	nbar.value = player.nitro
 	lbl_arrest.text = "ARREST  %d%%" % int(player.arrest)
+	warn_t -= get_physics_process_delta_time()
+	if warn_t <= 0.0:
+		lbl_warn.text = ""
+	tip_t -= get_physics_process_delta_time()
+	if tip_t <= 0.0 and state != State.COUNTDOWN:
+		lbl_tip.text = ""
 
 
 # ------------------------------------------------------------------ main loop
 func _physics_process(delta: float) -> void:
 	sim_time += delta
+	menu.can_pause = not autotest and ptest == "" and state >= State.COUNTDOWN
+	if menu.can_pause and not menu.cfg["seen_help"]:   # first launch: explain the game before the first race
+		menu.cfg["seen_help"] = true
+		menu.open("help")
 	match state:
 		State.SETTLE:
 			_state_settle(delta)
@@ -341,6 +513,8 @@ func _physics_process(delta: float) -> void:
 			_state_racing(delta)
 		State.BUSTED, State.ESCAPED:
 			_state_over(delta)
+		State.LEG_CLEAR:
+			_state_leg_clear(delta)
 		State.PTEST:
 			_state_ptest(delta)
 	_update_camera(delta)
@@ -401,33 +575,65 @@ func _build_field() -> void:
 			var slot: Array = GRID[AI_SLOTS[k]]
 			var ai = _new_car(1, spec[1], spec[2], spec[0], slot[0], slot[1])
 			ai.lane = spec[3]
+			ai.set_meta("slot", AI_SLOTS[k])
 			racers.append(ai)
-		for k in range(COP_COUNT):
-			var cop = _new_car(2, Color.WHITE, COP_SPEED, "COP %d" % (k + 1), COP_GRID[k][0], COP_GRID[k][1])
-			cop.lane = COP_GRID[k][1] * 0.6
-			cops.append(cop)
 	elif ptest != "":
 		track.get_node("Walls").queue_free()
-	_reset_grid()
+	_start_leg()
+	if ptest != "":
+		state = State.PTEST
 
+
+## Cops for this leg (more, faster, earlier each leg), the minimap, lights, then the grid.
+func _start_leg() -> void:
+	for c in cops:
+		remove_child(c)
+		c.queue_free()
+	cops.clear()
+	if ptest == "" and not OS.get_cmdline_user_args().has("solo"):
+		for k in range(int(LEGS[leg][1])):
+			var cop = _new_car(2, Color.WHITE, LEGS[leg][2], "COP %d" % (k + 1), COP_GRID[k][0], COP_GRID[k][1])
+			cop.top_speed = LEGS[leg][3]
+			cop.lane = COP_GRID[k][1] * 0.6
+			cops.append(cop)
+	for o in obstacles:
+		if is_instance_valid(o["node"]):
+			o["node"].queue_free()
+	obstacles.clear()
+	obs_t = LEGS[leg][5]
 	var items: Array = []
 	for r in racers:
 		items.append([r, r.body_color])
+		r.visible = not r.busted   # robbers busted on an earlier leg sit the rest of the run out
+		r.process_mode = Node.PROCESS_MODE_INHERIT if not r.busted else Node.PROCESS_MODE_DISABLED
 	for c in cops:
 		items.append([c, Color(0.3, 0.55, 1.0)])
 	minimap.items = items
-
-	state = State.PTEST if ptest != "" else State.COUNTDOWN
+	_apply_map()
+	leg_snapshot.clear()
+	for r in racers:
+		leg_snapshot[r] = [r.busted, r.arrest, r.get_meta("slot")]
+	leg_start_time = run_time
+	if autotest:
+		for sc in track.shortcuts:
+			print("[shortcut] %s a=%d b=%d (%d m cut vs %d m road)" % [track.map["name"], sc["a"], sc["b"], int(sc["pts"][0].distance_to(sc["pts"][-1])), int((sc["b"] - sc["a"]) * track.spacing)])
+	_reset_grid()
+	state = State.COUNTDOWN
 	_begin_countdown()
 
 
 ## Teleport everybody back to their starting slot (used at boot and on restart).
 func _reset_grid() -> void:
-	for k in range(racers.size()):
-		var r = racers[k]
-		var gs: Array = GRID[PLAYER_SLOT if r == player else AI_SLOTS[k - 1]]
+	for r in racers:
+		var gs: Array = GRID[r.get_meta("slot")]
+		var keep: Array = leg_snapshot.get(r, [false, 0.0])
 		r.teleport(_grid_transform(r, gs[0], gs[1]))
 		_place_state(r, gs[0])
+		r.busted = keep[0]
+		r.arrest = keep[1]
+		r.nitro = 1.0
+		r.spiked_t = 0.0
+		r.set_ghost(r.busted)
 	for k in range(cops.size()):
 		var c = cops[k]
 		c.teleport(_grid_transform(c, COP_GRID[k][0], COP_GRID[k][1]))
@@ -441,48 +647,133 @@ func _begin_countdown() -> void:
 	nearest_cop = 999.0
 	finish_order.clear()
 	lap_marks.clear()
+	last_beep = -1
+	fx.fade = 1.0
+	wrong_t = 0.0
+	stuck_t = 0.0
+	last_prog = player.prog
+	lbl_tip.text = ("TIP: " + TIPS[randi() % TIPS.size()]) if menu.cfg["tips"] else ""
 	lbl_msg.add_theme_color_override("font_color", Color(1, 0.95, 0.5))
 	cam_dir = player.forward_world()
 	cam_dir.y = 0.0
 	cam_dir = cam_dir.normalized()
 
 
-## Instant restart: no scene reload, no re-calibration.
+## Busted: retry this leg as it started. Escaped: a fresh run from leg 1. No reload, no recalibration.
 func _restart() -> void:
-	_reset_grid()
-	state = State.COUNTDOWN
-	_begin_countdown()
+	tip_t = 0.0
+	if state == State.ESCAPED:
+		_goto_leg(0, true)
+		return
+	run_time = leg_start_time
+	for r in racers:   # undo whatever happened during the failed attempt
+		var s: Array = leg_snapshot[r]
+		r.busted = s[0]
+		r.arrest = s[1]
+		r.set_meta("slot", s[2])
+	_start_leg()
+
+
+## Load a leg's map. `fresh` = new run (everyone back, bars empty, original grid).
+func _goto_leg(i: int, fresh: bool) -> void:
+	var order: Array = _standings()
+	leg = i
+	_make_track()
+	if fresh:
+		run_time = 0.0
+		for r in racers:
+			r.busted = false
+			r.arrest = 0.0
+		player.set_meta("slot", PLAYER_SLOT)
+		for k in range(1, racers.size()):
+			racers[k].set_meta("slot", AI_SLOTS[k - 1])
+	else:
+		# grid in finishing order; arrest bars carry over in part
+		var s: int = 0
+		for r in order:
+			r.set_meta("slot", s)
+			s += 1
+			r.arrest *= ARREST_CARRY
+	_start_leg()
 
 
 ## 4) 3-2-1-GO
 func _state_countdown(delta: float) -> void:
 	timer += delta
 	var left: float = COUNTDOWN_TIME - timer
+	fx.fade = maxf(0.0, fx.fade - delta * 2.0)
 	if left > 0.0:
-		lbl_msg.text = str(int(ceilf(left)))
-		lbl_sub.text = "%d laps. Beat the other robbers. Don't get caught." % TOTAL_LAPS
+		var n: int = int(ceilf(left))
+		if n != last_beep:
+			last_beep = n
+			_play("beep")
+		lbl_msg.text = str(n)
+		lbl_sub.text = "LEG %d/%d  %s  (%s)   %d laps, %d cops" % [leg + 1, LEGS.size(), track.map["name"], track.map["time"], laps, cops.size()]
 	else:
+		_play("beep_go")
 		state = State.RACING
 		race_time = 0.0
 		lbl_msg.text = "GO!"
 		lbl_sub.text = ""
+		lbl_tip.text = ""
 		timer = 0.0
 		for r in racers:
 			r.controls_enabled = true
 		for c in cops:
-			c.controls_enabled = false  # released after COP_DELAY
+			c.controls_enabled = false  # released after the leg's cop delay
 
 
 ## 5) the race
 func _state_racing(delta: float) -> void:
 	race_time += delta
+	run_time += delta
 	timer += delta
 	if timer > 1.2:
 		lbl_msg.text = ""
 	_update_pace()
 	_update_cop_targets(delta)
 	_update_arrests(delta)
+	_update_obstacles(delta)
 	_update_finishes()
+	if player.on_dirt and warn_t <= 0.0:
+		_warn("SHORTCUT  -  loose dirt", 0.5)
+	_update_tips(delta)
+
+
+## Plain-language hints for whatever the player seems to be struggling with.
+func _update_tips(delta: float) -> void:
+	var spd: float = player.linear_velocity.length()
+	var dp: float = player.prog - last_prog
+	last_prog = player.prog
+	wrong_t = wrong_t + delta if dp < 0.0 and spd > 6.0 else 0.0
+	if wrong_t > 1.5 and warn_t <= 0.0 and not player.busted:
+		_warn("WRONG WAY!  Turn around  (or press R)", 1.0)
+	if player.boosting:
+		used_nitro = true
+	if not menu.cfg["tips"] or player.busted or player.finished:
+		return
+	stuck_t = stuck_t + delta if spd < 1.5 else 0.0
+	if race_time > 4.0 and race_time < 6.0 and spd < 2.0:
+		_tip("go", "Hold W (or the UP arrow) to drive!")
+	elif stuck_t > 4.0 and race_time > 8.0:
+		_tip("stuck", "Stuck? Press R to put your car back on the road.")
+	elif player.arrest > 25.0 and nearest_cop < 14.0:
+		_tip("arrest", "A cop is right on you! Get away (SHIFT for nitro) before the red bar fills.")
+	elif player.spiked_t > 0.0:
+		_tip("spikes", "Spikes popped your tyres! Grip comes back in a few seconds. Avoid the flashing strips.")
+	elif player.nitro < 0.05:
+		_tip("nitro_out", "Out of nitro. Drift (hold SPACE while turning) to refill it fast.")
+	elif not used_nitro and race_time > 12.0 and player.nitro > 0.95:
+		_tip("nitro", "Your nitro is full (blue bar). Press SHIFT for a speed boost!")
+
+
+## Show a tip unless the same one was shown in the last 40 s.
+func _tip(id: String, text: String) -> void:
+	if tip_t > 0.0 or sim_time < float(tip_cd.get(id, -1.0)):
+		return
+	tip_cd[id] = sim_time + 40.0
+	lbl_tip.text = "TIP: " + text
+	tip_t = 5.0
 
 
 ## Rubber-banding. Cops speed up when far behind their target and ease off when
@@ -528,7 +819,14 @@ func _update_cop_targets(delta: float) -> void:
 				best_score = sc
 				best = r
 		c.target_car = best
-		c.controls_enabled = best != null and race_time > COP_DELAY
+		c.controls_enabled = best != null and race_time > LEGS[leg][4]
+	var near_cop = null
+	for c in cops:
+		c.siren_on = false
+		if near_cop == null or c.global_position.distance_squared_to(cam.global_position) < near_cop.global_position.distance_squared_to(cam.global_position):
+			near_cop = c
+	if near_cop != null:
+		near_cop.siren_on = true
 
 
 func _update_arrests(delta: float) -> void:
@@ -543,7 +841,7 @@ func _update_arrests(delta: float) -> void:
 			var d: float = c.global_position.distance_to(r.global_position)
 			if r == player:
 				nearest_cop = minf(nearest_cop, d)
-			rate += clampf((12.0 - d) / 12.0, 0.0, 1.0) * 30.0
+			rate += clampf((12.0 - d) / 12.0, 0.0, 1.0) * LEGS[leg][6]
 		if rate > 0.0:
 			r.arrest += rate * delta
 		else:
@@ -559,6 +857,7 @@ func _bust(r) -> void:
 	r.set_ghost(true)
 	if r == player:
 		var order: Array = _standings()
+		_play("busted")
 		_end_race(State.BUSTED, order.find(player) + 1)
 
 
@@ -570,7 +869,11 @@ func _update_finishes() -> void:
 			r.finished = true
 			finish_order.append(r)
 			if r == player:
-				_end_race(State.ESCAPED, finish_order.size())
+				_play("escaped")
+				if leg < LEGS.size() - 1:
+					_end_race(State.LEG_CLEAR, finish_order.size())
+				else:
+					_end_race(State.ESCAPED, finish_order.size())
 
 
 func _end_race(result: int, place: int) -> void:
@@ -584,16 +887,158 @@ func _end_race(result: int, place: int) -> void:
 	if result == State.BUSTED:
 		lbl_msg.text = "BUSTED!"
 		lbl_msg.add_theme_color_override("font_color", Color(1, 0.3, 0.3))
-		lbl_sub.text = "The cops got you.   Press ENTER to try again."
+		lbl_sub.text = "The cops got you on leg %d.   Press ENTER to retry the leg." % (leg + 1)
+		lbl_tip.text = "TIP: when the red ARREST bar starts filling, use nitro (SHIFT) to get away from the cop."
+		tip_t = 999.0
+	elif result == State.LEG_CLEAR:
+		lbl_msg.text = "LEG %d CLEAR" % (leg + 1)
+		lbl_msg.add_theme_color_override("font_color", Color(0.5, 1, 0.5))
+		lbl_sub.text = "%s in %s.   Next: %s (%s)" % [ordinal, _time_str(race_time), TrackScript.MAPS[leg + 1]["name"], TrackScript.MAPS[leg + 1]["time"]]
 	else:
 		lbl_msg.text = "YOU ESCAPED!"
 		lbl_msg.add_theme_color_override("font_color", Color(0.5, 1, 0.5))
-		lbl_sub.text = "Finished %s in %s.   Press ENTER to go again." % [ordinal, _time_str(race_time)]
+		lbl_sub.text = "Out of the city, %s on the last leg. Total %s.   Press ENTER for a new run." % [ordinal, _time_str(run_time)]
 
 
 func _state_over(_delta: float) -> void:
 	if Input.is_physical_key_pressed(KEY_ENTER) or Input.is_physical_key_pressed(KEY_KP_ENTER):
 		_restart()
+
+
+## Short pause on the result, fade to black, then the next map (the chase continues).
+func _state_leg_clear(delta: float) -> void:
+	timer += delta
+	if timer > 2.5:
+		fx.fade = minf(1.0, fx.fade + delta * 2.5)
+	if timer > 3.0 and fx.fade >= 1.0:
+		_goto_leg(leg + 1, false)
+
+
+func _warn(text: String, t: float = 2.0) -> void:
+	lbl_warn.text = text
+	warn_t = t
+
+
+# ------------------------------------------------------------------ obstacles
+## Spike strips and barricades. Dispatch drops them ~150 m ahead of the leading robber (out of sight
+## in the fog), or a cop that has got ahead of its target lays spikes right behind itself.
+func _update_obstacles(delta: float) -> void:
+	if obs_glow != null:
+		obs_glow.emission_energy_multiplier = 3.0 if int(race_time * 4.0) % 2 == 0 else 0.3
+	var every: float = LEGS[leg][5]
+	if every > 0.0 and race_time > 8.0:
+		obs_t -= delta
+		if obs_t <= 0.0:
+			obs_t = every * randf_range(0.8, 1.2)
+			if obstacles.size() < 3:
+				_spawn_obstacle()
+	if obstacles.is_empty():
+		for c in racers + cops:
+			c.dodge = INF
+		return
+	var min_prog: float = INF
+	for r in racers:
+		if not r.busted and not r.finished:
+			min_prog = minf(min_prog, r.prog)
+	for o in obstacles.duplicate():
+		if min_prog > o["prog"] + 15.0 or race_time - o["t0"] > 50.0:
+			o["node"].queue_free()
+			obstacles.erase(o)
+	for c in racers + cops:
+		c.dodge = INF
+		for o in obstacles:
+			var ahead: float = (o["prog"] - c.prog) * track.spacing
+			if ahead > 0.0 and ahead < 70.0 and (o["kind"] == Obs.BARRICADE or not c.is_cop):
+				c.dodge = -signf(o["lat"]) * track.width * 0.27
+			if c == player and not o["warned"] and ahead > 0.0 and ahead < 200.0:
+				o["warned"] = true
+				_warn("SPIKE STRIP AHEAD" if o["kind"] == Obs.SPIKES else "ROADBLOCK AHEAD")
+			if o["kind"] == Obs.SPIKES and not c.is_cop and not o["hit"].has(c) and absf(ahead) < 2.0:
+				var i: int = posmod(int(o["prog"]), track.count)
+				var lat: float = (c.global_position - track.points[i]).dot(track.right_at(i))
+				if absf(lat - o["lat"]) < track.width * 0.25 + 0.6:
+					o["hit"][c] = true
+					c.hit_spikes()
+					if c == player:
+						_warn("TYRES SHREDDED!", 1.5)
+
+
+func _spawn_obstacle() -> void:
+	var p: float = -INF
+	for r in racers:
+		if not r.busted and not r.finished:
+			p = maxf(p, r.prog + 150.0 / track.spacing)
+	var kind: int = Obs.SPIKES if randf() < 0.5 else Obs.BARRICADE
+	for c in cops:
+		if c.controls_enabled and c.target_car != null and (c.prog - c.target_car.prog) * track.spacing > 25.0:
+			p = c.prog - 4.0 / track.spacing
+			kind = Obs.SPIKES
+			break
+	if p == -INF or p >= total_progress - 5.0:
+		return
+	var i: int = posmod(int(p), track.count)
+	if track.shortcut_near(i, 6) >= 0 or i < 10 or i > track.count - 10:
+		return  # never at a shortcut mouth or on the start line
+	var lat: float = (-1.0 if randf() < 0.5 else 1.0) * track.width * 0.25
+	if obs_glow == null:
+		obs_glow = StandardMaterial3D.new()
+		obs_glow.albedo_color = Color(1.0, 0.6, 0.1)
+		obs_glow.emission_enabled = true
+		obs_glow.emission = Color(1.0, 0.5, 0.05)
+	var node: Node3D
+	var half_w: float = track.width * 0.25
+	if kind == Obs.SPIKES:
+		node = Node3D.new()
+		_obs_box(node, Vector3(half_w * 2.0, 0.08, 0.7), Vector3(0, 0.08, 0), Color(0.12, 0.12, 0.14))
+		for s in [-1.0, 1.0]:
+			_obs_box(node, Vector3(0.4, 0.15, 0.4), Vector3(half_w * s, 0.12, 0), obs_glow)
+	else:
+		# barricade: a row of loose barrels. Real rigid bodies, so a car ploughs through and loses speed
+		# instead of wedging (a static wall here would trap the AI); they settle and sleep, costing nothing.
+		node = Node3D.new()
+		for k in range(4):
+			var rb := RigidBody3D.new()
+			rb.mass = 90.0
+			var cs := CollisionShape3D.new()
+			var cyl := CylinderShape3D.new()
+			cyl.radius = 0.55
+			cyl.height = 1.2
+			cs.shape = cyl
+			rb.add_child(cs)
+			var mi := MeshInstance3D.new()
+			var cm := CylinderMesh.new()
+			cm.top_radius = 0.55
+			cm.bottom_radius = 0.55
+			cm.height = 1.2
+			cm.radial_segments = 8
+			mi.mesh = cm
+			var bm := StandardMaterial3D.new()
+			bm.albedo_color = Color(0.95, 0.4, 0.05) if k % 2 == 0 else Color(0.95, 0.95, 0.95)
+			mi.material_override = bm
+			rb.add_child(mi)
+			_obs_box(rb, Vector3(0.25, 0.25, 0.25), Vector3(0, 0.75, 0), obs_glow)
+			rb.position = Vector3((float(k) - 1.5) * half_w * 0.55, 0.62, 0)
+			node.add_child(rb)
+	node.transform = Transform3D(Basis.looking_at(track.tangents[i], Vector3.UP), track.points[i] + track.right_at(i) * lat)
+	if autotest:
+		print("[obstacle] %s at idx=%d lat=%.1f" % ["spikes" if kind == Obs.SPIKES else "barricade", i, lat])
+	track.add_child(node)
+	obstacles.append({"node": node, "prog": floorf(p), "lat": lat, "kind": kind, "t0": race_time, "hit": {}, "warned": false})
+
+
+func _obs_box(parent: Node3D, size: Vector3, pos: Vector3, look) -> void:
+	var mi := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = size
+	mi.mesh = bm
+	mi.position = pos
+	if look is Material:
+		mi.material_override = look
+	else:
+		var m := StandardMaterial3D.new()
+		m.albedo_color = look
+		mi.material_override = m
+	parent.add_child(mi)
 
 
 # --------------------------------------------------------------------- camera
@@ -609,15 +1054,29 @@ func _update_camera(delta: float) -> void:
 	cam.global_position = player.global_position - cam_dir * back + Vector3(0, height, 0)
 	cam.look_at(player.global_position + cam_dir * (5.0 + 5.0 * sn) + Vector3(0, 1.0, 0), Vector3.UP)
 	# lean into turns
-	var roll_t: float = clampf(-player.angular_velocity.y * 0.05 * (0.4 + sn), -0.12, 0.12)
+	var roll_t: float = clampf(-player.angular_velocity.y * 0.05 * (0.4 + sn), -0.12, 0.12) if menu.cfg["shake"] else 0.0
 	cam_roll = lerpf(cam_roll, roll_t, clampf(5.0 * delta, 0.0, 1.0))
 	cam.rotate_object_local(Vector3(0, 0, -1), cam_roll)
 	# FOV widens hard with speed; a little shake when flat out
-	cam.fov = lerpf(cam.fov, 66.0 + 34.0 * sn * sn + 6.0 * sn, clampf(4.0 * delta, 0.0, 1.0))
-	var shake: float = 0.05 * sn * sn
+	var b: float = 1.0 if player.boosting else 0.0
+	fx.boost = lerpf(fx.boost, b, clampf(6.0 * delta, 0.0, 1.0))
+	cam.fov = lerpf(cam.fov, 66.0 + 34.0 * sn * sn + 6.0 * sn + 12.0 * fx.boost, clampf(4.0 * delta, 0.0, 1.0))
+	if not menu.cfg["speed_fx"]:   # comfort setting: fixed view, no streaks
+		cam.fov = 70.0
+		fx.intensity = 0.0
+		fx.boost = 0.0
+	var shake: float = (0.05 * sn * sn + 0.06 * fx.boost) if menu.cfg["shake"] else 0.0
 	cam.h_offset = randf_range(-1.0, 1.0) * shake
 	cam.v_offset = randf_range(-1.0, 1.0) * shake
-	fx.intensity = lerpf(fx.intensity, clampf((spd - 26.0) / 26.0, 0.0, 1.0), clampf(4.0 * delta, 0.0, 1.0))
+	if menu.cfg["speed_fx"]:
+		fx.intensity = lerpf(fx.intensity, clampf((spd - 26.0) / 26.0, 0.0, 1.0), clampf(4.0 * delta, 0.0, 1.0))
+	wind.emitting = spd > 32.0 or player.boosting
+	wind.speed_scale = 0.7 + sn * 0.5 + fx.boost * 0.5
+	if tune.has("top"):  # test hook: look straight down on centre-line sample `top` from 140 m up
+		var tp: Vector3 = track.points[posmod(int(tune["top"]), track.count)]
+		cam.global_position = tp + Vector3(0, 140, 0)
+		cam.look_at(tp, Vector3(0, 0, -1))
+		cam.fov = 70.0
 
 
 # ------------------------------------------------------------------ test hook
@@ -696,6 +1155,10 @@ func _state_ptest(delta: float) -> void:
 
 
 func _autotest_log(delta: float) -> void:
+	if tune.has("shots"):  # test hook: shots=5,20 shotdir=/some/dir saves screenshots at those sim times
+		for s in String(tune["shots"]).split(","):
+			if sim_time >= float(s) and sim_time - delta < float(s):
+				get_viewport().get_texture().get_image().save_png("%s/shot_%s.png" % [tune.get("shotdir", "."), s])
 	if state == State.PTEST:
 		return
 	if tune.has("trace") and state == State.RACING and player.idx >= int(tune["trace"]) and player.idx <= int(tune["trace"]) + 24:
@@ -722,8 +1185,10 @@ func _autotest_log(delta: float) -> void:
 		_restart()
 		print("[restart] sim_time=%.2f done in %d ms -> state=%d, player prog=%.0f, busted=%s, finish_order=%d" % [sim_time, Time.get_ticks_msec() - t0, state, player.prog, str(player.busted), finish_order.size()])
 		return
-	if state == State.BUSTED or state == State.ESCAPED or sim_time > 260.0:
-		var res: String = "[autotest] result state=%d race_time=%.1f order:" % [state, race_time]
+	if state == State.LEG_CLEAR and timer == 0.0:
+		print("[leg %d clear] race_time=%.1f obstacles=%d shortcuts=%d" % [leg + 1, race_time, obstacles.size(), track.shortcuts.size()])
+	if state == State.BUSTED or state == State.ESCAPED or sim_time > 900.0:
+		var res: String = "[autotest] result state=%d leg=%d race_time=%.1f run_time=%.1f order:" % [state, leg + 1, race_time, run_time]
 		for r in _standings():
 			res += " " + r.driver_name + ("(B)" if r.busted else "")
 		print(res)

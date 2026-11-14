@@ -4,6 +4,7 @@ extends Control
 var track = null
 var items: Array = []  # each entry: [node, colour]
 var pts: PackedVector2Array = PackedVector2Array()
+var sc_lines: Array = []   # one PackedVector2Array per shortcut
 var scale_f: float = 1.0
 var offset: Vector2 = Vector2.ZERO
 
@@ -24,6 +25,12 @@ func setup(t) -> void:
 	for p in t.points:
 		pts.append(Vector2(p.x, p.z) * scale_f + offset)
 	pts.append(pts[0])
+	sc_lines.clear()
+	for sc in t.shortcuts:
+		var line := PackedVector2Array()
+		for p in sc["pts"]:
+			line.append(Vector2(p.x, p.z) * scale_f + offset)
+		sc_lines.append(line)
 
 
 func _process(_delta: float) -> void:
@@ -34,6 +41,8 @@ func _draw() -> void:
 	draw_rect(Rect2(Vector2.ZERO, custom_minimum_size), Color(0, 0, 0, 0.45))
 	if pts.size() > 1:
 		draw_polyline(pts, Color(0.85, 0.85, 0.9, 0.9), 3.0)
+	for line in sc_lines:
+		draw_polyline(line, Color(0.8, 0.6, 0.3, 0.9), 2.0)
 	for it in items:
 		var n = it[0]
 		if is_instance_valid(n):

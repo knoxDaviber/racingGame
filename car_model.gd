@@ -232,13 +232,13 @@ func _setup_sirens(named: Dictionary, is_cop: bool, holder: Node3D, fit: Transfo
 
 
 ## Same call the box car's siren uses: phase true = red on / blue off.
-func set_siren(phase: bool) -> void:
+func set_siren(phase: bool, lights: bool = true) -> void:
 	for rec in sirens:
 		var on: bool = phase if rec["red"] else not phase
 		for m in rec["mats"]:
 			(m as BaseMaterial3D).emission_energy_multiplier = SIREN_GLOW_ON if on else SIREN_GLOW_OFF
 		for i in range((rec["lights"] as Array).size()):
-			((rec["lights"] as Array)[i] as Light3D).light_energy = (rec["energy"] as Array)[i] if on else 0.0
+			((rec["lights"] as Array)[i] as Light3D).light_energy = (rec["energy"] as Array)[i] if on and lights else 0.0
 
 
 ## Paint the racer's body paint in its colour. Returns how many surfaces were repainted.
