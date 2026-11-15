@@ -40,7 +40,7 @@ const LEGS: Array = [
 ]
 enum Obs { SPIKES, BARRICADE }
 
-enum State { SETTLE, TEST, COUNTDOWN, RACING, BUSTED, ESCAPED, PTEST, LEG_CLEAR }
+enum State { SETTLE, TEST, LOADING, COUNTDOWN, RACING, BUSTED, ESCAPED, PTEST, LEG_CLEAR }
 
 # name, colour, AI cruising speed (m/s), lane offset
 const ROBBERS: Array = [
@@ -83,6 +83,16 @@ var leg_snapshot: Dictionary = {}    # racer -> [busted, arrest, slot] at the st
 var obstacles: Array = []            # {node, prog, lat, kind, t0, hit: {}, warned}
 var obs_t: float = 0.0
 var obs_glow: StandardMaterial3D
+var obs_mats: Dictionary = {}       # Color -> StandardMaterial3D (see _obs_mat)
+var warmed_map: int = -1             # leg whose shaders are already compiled (see _begin_loading)
+var load_steps: Array = []           # [camera transform, warm-rig position] per loading frame
+var load_i: int = 0
+var load_frame: int = -1
+var load_layer: CanvasLayer
+var load_bar: ProgressBar
+var load_lbl: Label
+var warm_rig: Node3D
+var hitch_last: int = 0
 var env: Environment
 var sky_mat: ProceduralSkyMaterial
 var sun: DirectionalLight3D
@@ -166,6 +176,7 @@ func _ready() -> void:
 	player.cam = cam
 	_build_wind()
 	_build_sfx()
+	_build_loading_ui()
 
 	_build_hud()
 	menu = MenuScript.new()
@@ -240,6 +251,7 @@ func _make_track() -> void:
 		track.a_lat = float(tune["alat"])
 	add_child(track)
 	track.build()
+	warmed_map = -1   # new materials: compile again
 	laps = int(LEGS[leg][0])
 	total_progress = float(laps * track.count)
 	for c in racers + cops:
@@ -506,11 +518,15 @@ func _physics_process(delta: float) -> void:
 	if menu.can_pause and not menu.cfg["seen_help"]:   # first launch: explain the game before the first race
 		menu.cfg["seen_help"] = true
 		menu.open("help")
+	if state < State.LOADING:   # start-up calibration fills the first part of the loading bar
+		load_bar.value = minf(15.0, load_bar.value + delta * 8.0)
 	match state:
 		State.SETTLE:
 			_state_settle(delta)
 		State.TEST:
 			_state_test(delta)
+		State.LOADING:
+			_state_loading()
 		State.COUNTDOWN:
 			_state_countdown(delta)
 		State.RACING:
@@ -521,7 +537,8 @@ func _physics_process(delta: float) -> void:
 			_state_leg_clear(delta)
 		State.PTEST:
 			_state_ptest(delta)
-	_update_camera(delta)
+	if state != State.LOADING:
+		_update_camera(delta)
 	_layout_hud()
 	if state >= State.COUNTDOWN and state != State.PTEST:
 		_update_hud()
@@ -622,8 +639,12 @@ func _start_leg() -> void:
 		for sc in track.shortcuts:
 			print("[shortcut] %s a=%d b=%d (%d m cut vs %d m road)" % [track.map["name"], sc["a"], sc["b"], int(sc["pts"][0].distance_to(sc["pts"][-1])), int((sc["b"] - sc["a"]) * track.spacing)])
 	_reset_grid()
-	state = State.COUNTDOWN
-	_begin_countdown()
+	if ptest == "" and warmed_map != leg and DisplayServer.get_name() != "headless":   # headless draws no frames
+		_begin_loading()
+	else:
+		load_layer.visible = false
+		state = State.COUNTDOWN
+		_begin_countdown()
 
 
 ## Teleport everybody back to their starting slot (used at boot and on restart).
@@ -984,6 +1005,149 @@ func _spawn_obstacle() -> void:
 	if track.shortcut_near(i, 6) >= 0 or i < 10 or i > track.count - 10:
 		return  # never at a shortcut mouth or on the start line
 	var lat: float = (-1.0 if randf() < 0.5 else 1.0) * track.width * 0.25
+	var node := _build_obstacle(kind)
+	node.transform = Transform3D(Basis.looking_at(track.tangents[i], Vector3.UP), track.points[i] + track.right_at(i) * lat)
+	if autotest:
+		print("[obstacle] %s at idx=%d lat=%.1f" % ["spikes" if kind == Obs.SPIKES else "barricade", i, lat])
+	track.add_child(node)
+	obstacles.append({"node": node, "prog": floorf(p), "lat": lat, "kind": kind, "t0": race_time, "hit": {}, "warned": false})
+
+
+# -------------------------------------------------------------------- loading
+## The first time the GPU draws a material (with this map's lights and fog) it compiles a shader, which
+## freezes the game for 0.1-0.5 s (worse on the web). So before each new map, behind a loading bar, the
+## camera visits the whole road and every shortcut once with a rig of the things that only show up later
+## (obstacles, a siren light, the headlight, nitro flames), one stop per drawn frame.
+func _begin_loading() -> void:
+	state = State.LOADING
+	load_i = 0
+	load_frame = -1
+	load_steps.clear()
+	var step: int = maxi(1, int(45.0 / track.spacing))
+	for i in range(0, track.count, step):
+		var t: Vector3 = track.tangents[i]
+		var eye: Vector3 = track.points[i] - t * 7.0 + Vector3(0, 3.0, 0)
+		load_steps.append([Transform3D.IDENTITY.looking_at(t * 7.0 + Vector3(0, -2.0, 0), Vector3.UP).translated(eye), track.points[i] + t * 4.0])
+	for sc in track.shortcuts:
+		var pts: PackedVector3Array = sc["pts"]
+		for k in range(0, pts.size() - 1, maxi(1, pts.size() / 4)):
+			var t2: Vector3 = (pts[k + 1] - pts[k]).normalized()
+			load_steps.append([Transform3D.IDENTITY.looking_at(t2 * 7.0 + Vector3(0, -2.0, 0), Vector3.UP).translated(pts[k] - t2 * 7.0 + Vector3(0, 3.0, 0)), pts[k] + t2 * 4.0])
+	for c in cops + racers:   # every car model under the rig's lights (night: headlight + siren light on paint)
+		var cf: Vector3 = c.forward_world()
+		load_steps.append([Transform3D.IDENTITY.looking_at(cf * 7.0 + Vector3(0, -2.0, 0), Vector3.UP).translated(c.global_position - cf * 7.0 + Vector3(0, 3.0, 0)), c.global_position])
+	var fwd: Vector3 = player.forward_world()
+	var chase: Vector3 = player.global_position - fwd * 7.0 + Vector3(0, 3.0, 0)
+	load_steps.append([Transform3D.IDENTITY.looking_at(fwd * 7.0 + Vector3(0, -2.0, 0), Vector3.UP).translated(chase), player.global_position + fwd * 5.0])
+	_build_warm_rig()
+	wind.emitting = true
+	AudioServer.set_bus_mute(0, true)   # cameras flying past cars would start and stop their sounds
+	for n in sfx:
+		sfx[n].play()   # registers each sound with the web audio backend now, muted
+	player.snd_crash.play()
+	load_lbl.text = "LOADING  LEG %d: %s" % [leg + 1, track.map["name"]]
+	load_layer.visible = true
+
+
+
+## Shown from the first frame (covers start-up and calibration too) until the map's shaders are ready.
+func _build_loading_ui() -> void:
+	load_layer = CanvasLayer.new()
+	load_layer.layer = 100
+	add_child(load_layer)
+	var bg := ColorRect.new()
+	bg.color = Color(0.04, 0.05, 0.08)
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	load_layer.add_child(bg)
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	load_layer.add_child(center)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 14)
+	center.add_child(box)
+	load_lbl = _label(box, 30, Color(1.0, 0.85, 0.3))
+	load_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	load_bar = ProgressBar.new()
+	load_bar.show_percentage = false
+	load_bar.custom_minimum_size = Vector2(460, 18)
+	var fill := StyleBoxFlat.new()
+	fill.bg_color = Color(1.0, 0.75, 0.2)
+	var back := StyleBoxFlat.new()
+	back.bg_color = Color(1, 1, 1, 0.12)
+	load_bar.add_theme_stylebox_override("fill", fill)
+	load_bar.add_theme_stylebox_override("background", back)
+	box.add_child(load_bar)
+	load_lbl.text = "LOADING"
+
+
+func _build_warm_rig() -> void:
+	warm_rig = Node3D.new()
+	for kind in [Obs.SPIKES, Obs.BARRICADE]:
+		var o := _build_obstacle(kind)
+		o.position = Vector3(-2.0 if kind == Obs.SPIKES else 2.0, 0, 0)
+		for rb in o.get_children():
+			if rb is RigidBody3D:
+				rb.freeze = true
+				rb.collision_layer = 0
+				rb.collision_mask = 0
+		warm_rig.add_child(o)
+	var omni := OmniLight3D.new()   # same setup as a cop's siren light
+	omni.omni_range = 14.0
+	omni.light_energy = 3.0
+	omni.light_color = Color(1, 0.1, 0.1)
+	omni.position = Vector3(0, 1.4, 0)
+	warm_rig.add_child(omni)
+	if player.headlight != null:
+		var spot: SpotLight3D = player.headlight.duplicate()
+		spot.visible = true
+		spot.position = Vector3(0, 1.0, 6.0)
+		warm_rig.add_child(spot)
+	if not player.flames.is_empty():
+		var f: Node3D = player.flames[0].duplicate()
+		f.visible = true
+		f.position = Vector3(0, 1.0, 0)
+		warm_rig.add_child(f)
+	track.add_child(warm_rig)
+
+
+func _state_loading() -> void:
+	if Engine.get_frames_drawn() == load_frame:
+		return   # one stop per drawn frame, or the GPU never sees the earlier ones
+	load_frame = Engine.get_frames_drawn()
+	load_bar.value = maxf(load_bar.value, 15.0 + 85.0 * load_i / load_steps.size())
+	if load_i >= load_steps.size():
+		warm_rig.queue_free()
+		warm_rig = null
+		wind.emitting = false
+		for n in sfx:
+			sfx[n].stop()
+		player.snd_crash.stop()
+		AudioServer.set_bus_mute(0, false)
+		load_layer.visible = false
+		warmed_map = leg
+		load_bar.value = 0.0
+		if autotest:
+			print("[loading] %d stops, done at t=%.2f" % [load_steps.size(), sim_time])
+		state = State.COUNTDOWN
+		_begin_countdown()
+		return
+	cam.global_transform = load_steps[load_i][0]
+	warm_rig.global_position = load_steps[load_i][1]
+	warm_rig.look_at(cam.global_position * Vector3(1, 0, 1) + Vector3(0, warm_rig.global_position.y, 0), Vector3.UP)
+	load_i += 1
+
+
+## perf runs: report any frame over 50 ms, so no freeze goes unnoticed
+func _process(_d: float) -> void:
+	if not autotest or Engine.time_scale != 1.0:
+		return
+	var now: int = Time.get_ticks_usec()
+	if hitch_last > 0 and now - hitch_last > 50000 and state != State.LOADING:
+		print("HITCH t=%.2f %.0fms state=%d idx=%d" % [sim_time, (now - hitch_last) / 1000.0, state, player.idx])
+	hitch_last = now
+
+
+func _build_obstacle(kind: int) -> Node3D:
 	if obs_glow == null:
 		obs_glow = StandardMaterial3D.new()
 		obs_glow.albedo_color = Color(1.0, 0.6, 0.1)
@@ -1016,18 +1180,12 @@ func _spawn_obstacle() -> void:
 			cm.height = 1.2
 			cm.radial_segments = 8
 			mi.mesh = cm
-			var bm := StandardMaterial3D.new()
-			bm.albedo_color = Color(0.95, 0.4, 0.05) if k % 2 == 0 else Color(0.95, 0.95, 0.95)
-			mi.material_override = bm
+			mi.material_override = _obs_mat(Color(0.95, 0.4, 0.05) if k % 2 == 0 else Color(0.95, 0.95, 0.95))
 			rb.add_child(mi)
 			_obs_box(rb, Vector3(0.25, 0.25, 0.25), Vector3(0, 0.75, 0), obs_glow)
 			rb.position = Vector3((float(k) - 1.5) * half_w * 0.55, 0.62, 0)
 			node.add_child(rb)
-	node.transform = Transform3D(Basis.looking_at(track.tangents[i], Vector3.UP), track.points[i] + track.right_at(i) * lat)
-	if autotest:
-		print("[obstacle] %s at idx=%d lat=%.1f" % ["spikes" if kind == Obs.SPIKES else "barricade", i, lat])
-	track.add_child(node)
-	obstacles.append({"node": node, "prog": floorf(p), "lat": lat, "kind": kind, "t0": race_time, "hit": {}, "warned": false})
+	return node
 
 
 func _obs_box(parent: Node3D, size: Vector3, pos: Vector3, look) -> void:
@@ -1039,10 +1197,17 @@ func _obs_box(parent: Node3D, size: Vector3, pos: Vector3, look) -> void:
 	if look is Material:
 		mi.material_override = look
 	else:
-		var m := StandardMaterial3D.new()
-		m.albedo_color = look
-		mi.material_override = m
+		mi.material_override = _obs_mat(look)
 	parent.add_child(mi)
+
+
+## One material per colour for the whole run, so obstacle shaders are never freed and recompiled.
+func _obs_mat(c: Color) -> StandardMaterial3D:
+	if not obs_mats.has(c):
+		var m := StandardMaterial3D.new()
+		m.albedo_color = c
+		obs_mats[c] = m
+	return obs_mats[c]
 
 
 # --------------------------------------------------------------------- camera

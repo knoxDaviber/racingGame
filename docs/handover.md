@@ -22,6 +22,11 @@ Updated 2026-11-15 (v0.2.2, everything committed and pushed to `main`).
 - The browser pane has no WebGL2, so the web build can't be run here; test it in a real browser.
 
 ## Next
+- 2026-11-15 (uncommitted): no more mid-race shader-compile freezes. New LOADING state + loading bar (main.gd
+  `_begin_loading`): per new map, the camera visits the road, shortcuts and every car with a rig of obstacles, siren
+  light, headlight and nitro flame, one stop per frame (~1 s native). Skipped on retries and headless.
+  `autotest perf` prints `HITCH` for any frame over 50 ms; a full 4-leg run shows none outside loading.
+  Cop-crash lag did not reproduce natively; if it persists on web, suspect web audio or physics.
 - Human playtest: new drift/handbrake feel, web frame rate (Night City with cops close), difficulty ramp,
   shortcut feel, obstacle frequency, audio mix.
 - If the web build still lags: robber cars keep 12 un-merged parts (paint + tiling UVs; see bake log), and day legs

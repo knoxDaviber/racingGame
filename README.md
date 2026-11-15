@@ -53,4 +53,4 @@ In-race tips (cyan) explain what to do when you are stuck, going the wrong way, 
 godot --headless --audio-driver Dummy --path . -- autotest [noarrest] [solo] [leg=0..3] [pspeed=30] [alat=12]
 godot --audio-driver Dummy --path . -- autotest leg=3 top=40 shots=5,20 shotdir=/tmp   (screenshots; top = view from above)
 godot --headless --path . -- autotest ptest=turn|drift|drift_long|brake|hb_straight ps=30
-godot --audio-driver Dummy --path . -- autotest perf noarrest leg=3    (real-time, uncapped: fps, draw calls, triangles)
+godot --audio-driver Dummy --path . -- autotest perf noarrest leg=3    (real-time, uncapped: fps, draw calls, triangles; HITCH = any frame over 50 ms)
