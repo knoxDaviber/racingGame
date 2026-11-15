@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.2
+- Performance: view distance cut from 900 m to each map's fog distance (340-450 m); scenery and road split into
+  120 m chunks that can be skipped when off-screen or past the fog (was one track-wide mesh each, always drawn);
+  car models baked into far fewer draw calls (tools/bake_car.gd); real siren lights on the nearest cop only.
+  Measured: first leg 414k -> 184k triangles a frame, draw calls 463 -> 340; Night City draw calls 276 -> 171.
+- Handbrake: SPACE without steering now brakes the rear wheels and cuts power (it used to cost nothing), and
+  nitro only refills while the car is really sliding (it used to refill whenever SPACE was held).
+- Drift: start it with SPACE + steering; it holds after SPACE is released while you steer into the turn on the
+  gas, and ends when you centre the wheel, brake or lift off.
+
 ## v0.2.1
 - Pause menu (ESC or P): Resume, How to play, Settings, Retry leg, New run, Quit (desktop only). Keyboard navigable.
 - How to play page, shown automatically on first launch.

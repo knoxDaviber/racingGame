@@ -136,8 +136,10 @@ var used_nitro: bool = false
 
 func _ready() -> void:
 	autotest = OS.get_cmdline_user_args().has("autotest")
-	if autotest:
+	if autotest and not OS.get_cmdline_user_args().has("perf"):   # perf = real time, for frame timing
 		Engine.time_scale = 4.0
+	if OS.get_cmdline_user_args().has("perf"):
+		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)   # uncapped fps = real cost
 	tune = _tuning_args()
 	ptest = String(tune.get("ptest", ""))
 	pt_speed = float(tune.get("ps", 25.0))
@@ -156,7 +158,7 @@ func _ready() -> void:
 	racers.append(player)
 
 	cam = Camera3D.new()
-	cam.far = 900.0     # depth fog is opaque well before this, so the cut-off is never seen
+	cam.far = 500.0     # set per map in _apply_map (fog is opaque just before it)
 	cam.fov = 68.0
 	cam.doppler_tracking = Camera3D.DOPPLER_TRACKING_PHYSICS_STEP
 	add_child(cam)
@@ -195,7 +197,6 @@ func _build_world() -> void:
 	# depth fog: linear from fog_begin to just short of the far plane, so distant scenery fades out
 	env.fog_enabled = true
 	env.fog_mode = Environment.FOG_MODE_DEPTH
-	env.fog_depth_end = 860.0
 	env.fog_depth_curve = 1.4
 	env.fog_sky_affect = 0.3
 	var we := WorldEnvironment.new()
@@ -218,6 +219,9 @@ func _apply_map() -> void:
 	env.ambient_light_energy = m["ambient"]
 	env.fog_light_color = m["fog_col"]
 	env.fog_depth_begin = m["fog_begin"]
+	# nothing is drawn past the fog: far plane and fog end at the map's view distance
+	env.fog_depth_end = track.view_dist()
+	cam.far = track.view_dist() + 10.0
 	sun.rotation_degrees = m["sun_rot"]
 	sun.light_color = m["sun_col"]
 	sun.light_energy = m["sun_e"]
@@ -1139,6 +1143,13 @@ func _state_ptest(delta: float) -> void:
 				p.in_handbrake = true
 				p.in_throttle = 0.6
 				done = pt_phase_t > 3.5
+			"hb_straight":   # SPACE held in a straight line: must cost speed and earn no nitro
+				p.in_handbrake = true
+				if pt_phase_t <= 0.1:   # (one tick is 0.067 s at the test's 4x speed)
+					p.nitro = 0.5
+				done = pt_phase_t > 2.0
+				if done:
+					print("hb_straight nitro=%.3f (started 0.500)" % p.nitro)
 			"brake":
 				p.in_throttle = 0.0
 				p.in_brake = 1.0
@@ -1148,7 +1159,7 @@ func _state_ptest(delta: float) -> void:
 		pt_log_t = 0.0
 		var yaw: float = p.angular_velocity.y
 		var hd: float = wrapf(_heading_deg(p) - pt_heading0, -180.0, 180.0)
-		print("t=%4.2f spd=%5.1f yaw=%5.2f rad/s latG=%5.1f slip=%6.1f deg  turned=%6.1f deg  steer=%.2f hb=%.2f" % [pt_phase_t, p.linear_velocity.length(), yaw, absf(yaw) * p.linear_velocity.length(), rad_to_deg(p.slip_angle()), hd, p.steering, p.hb_amount])
+		print("t=%4.2f spd=%5.1f yaw=%5.2f rad/s latG=%5.1f slip=%6.1f deg  turned=%6.1f deg  steer=%.2f hb=%.2f drift=%s nitro=%.2f" % [pt_phase_t, p.linear_velocity.length(), yaw, absf(yaw) * p.linear_velocity.length(), rad_to_deg(p.slip_angle()), hd, p.steering, p.hb_amount, str(p.drifting), p.nitro])
 	if done:
 		print("[ptest done]")
 		get_tree().quit()
@@ -1161,6 +1172,8 @@ func _autotest_log(delta: float) -> void:
 				get_viewport().get_texture().get_image().save_png("%s/shot_%s.png" % [tune.get("shotdir", "."), s])
 	if state == State.PTEST:
 		return
+	if OS.get_cmdline_user_args().has("perf") and int(sim_time * 2.0) != int((sim_time - delta) * 2.0):
+		print("PERF t=%.1f idx=%d fps=%d frame=%.1fms phys=%.1fms draws=%d prims=%dk objs=%d cop=%d" % [sim_time, player.idx, Engine.get_frames_per_second(), Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0, Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0, Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME), int(Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME) / 1000.0), Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME), int(nearest_cop)])
 	if tune.has("trace") and state == State.RACING and player.idx >= int(tune["trace"]) and player.idx <= int(tune["trace"]) + 24:
 		pt_log_t += delta
 		if pt_log_t > 0.2:

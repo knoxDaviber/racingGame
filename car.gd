@@ -27,6 +27,9 @@ const DRIFT_SLIP: float = 0.5          # slide angle (rad, ~29 deg) a normal han
 const DRIFT_SLIP_EXTRA: float = 0.8    # extra angle you can only reach by holding full lock + handbrake for ~2 s
 const DRIFT_K: float = 4.5             # how quickly the slide angle converges (1/s)
 const DRIFT_ASSIST: float = 9.0
+const HANDBRAKE_FORCE: float = 70.0    # rear-wheel brake while SPACE is held: the handbrake costs speed
+const HANDBRAKE_ENGINE: float = 0.3    # front wheels keep this share of engine power on the handbrake
+const DRIFT_HOLD_GRIP: float = 0.75    # rear grip while a drift is held on throttle after letting go of SPACE
 
 # --- nitrous (everyone has it). A full tank is ~3 s of boost; it refills slowly, and fast while drifting.
 const NITRO_POWER: float = 1.9         # engine force multiplier while boosting
@@ -82,6 +85,8 @@ var reset_cd: float = 0.0
 var prev_vel_ang: float = 0.0
 var drift_t: float = 0.0
 var hb_amount: float = 0.0     # 0..1 how engaged the handbrake slide is
+var drifting: bool = false     # a slide started with the handbrake, held on throttle + steering
+var drift_dir: float = 0.0     # +1 = drifting left (in_steer sign when it started)
 var scripted: bool = false     # test harness sets in_* directly
 var busted: bool = false
 var finished: bool = false
@@ -390,9 +395,10 @@ func _update_audio(delta: float) -> void:
 
 
 func _update_nitro(delta: float, fspeed: float) -> void:
-	var sliding: bool = hb_amount > 0.4 or absf(slip_angle()) > 0.25
-	if sliding and absf(fspeed) > 10.0 and wheels_in_contact() >= 2:
-		nitro += NITRO_DRIFT_REFILL * delta
+	# only a real slide refills it (holding SPACE in a straight line slides nothing, so it earns nothing)
+	var slide: float = absf(slip_angle())
+	if slide > 0.2 and absf(fspeed) > 10.0 and wheels_in_contact() >= 2:
+		nitro += NITRO_DRIFT_REFILL * clampf((slide - 0.2) / 0.3, 0.0, 1.0) * delta
 	if boosting:
 		nitro -= NITRO_DRAIN * delta
 		if nitro <= 0.0 or not in_nitro or in_brake > 0.05:
@@ -463,6 +469,7 @@ func teleport(xf: Transform3D) -> void:
 	flipped_t = 0.0
 	stuck_t = 0.0
 	reverse_t = 0.0
+	drifting = false
 
 
 ## Busted cars stay visible but stop colliding with other cars (they'd be a wreck
@@ -513,7 +520,7 @@ func _apply_grip() -> void:
 	for w in wheels:
 		var grip: float = w.get_meta("grip", GRIP_FRONT)
 		if not w.use_as_steering:
-			grip *= lerpf(1.0, HANDBRAKE_REAR_GRIP, hb_amount)
+			grip *= lerpf(DRIFT_HOLD_GRIP if drifting else 1.0, HANDBRAKE_REAR_GRIP, hb_amount)
 		if on_dirt:
 			grip *= track.SC_GRIP
 		if spiked_t > 0.0:
@@ -534,19 +541,31 @@ func _yaw_assist(delta: float, fspeed: float) -> void:
 	prev_vel_ang = vang
 	if wheels_in_contact() < 2 or fspeed < 3.0:
 		drift_t = 0.0
+		drifting = false
 		return
 	var w: float = angular_velocity.y
 	var beta: float = slip_angle()
 	var target: float
 	var gain: float
-	if hb_amount > 0.25:
-		if absf(in_steer) > 0.8:
+	_update_drift(fspeed, beta)
+	if drifting:
+		# steer INTO the drift = wider angle (and, held ~2 s, wider still); a little steer = medium angle;
+		# counter-steer = straighten up.
+		var into: float = in_steer * drift_dir
+		if into > 0.5:
 			drift_t += delta
 		else:
 			drift_t = maxf(0.0, drift_t - 2.0 * delta)
-		var slip_t: float = -in_steer * (DRIFT_SLIP + DRIFT_SLIP_EXTRA * clampf((drift_t - 0.7) / 1.3, 0.0, 1.0))
+		var amount: float = DRIFT_SLIP + DRIFT_SLIP_EXTRA * clampf((drift_t - 0.7) / 1.3, 0.0, 1.0)
+		if into < -0.5:
+			amount = DRIFT_SLIP * 0.3
+		elif into < 0.5:
+			amount = DRIFT_SLIP * 0.75
+		var slip_t: float = -drift_dir * amount
 		target = w_v - DRIFT_K * (slip_t - beta)
-		gain = DRIFT_ASSIST * hb_amount
+		# entry builds up with the handbrake (a stiff assist here kills the turn-in); held on throttle after
+		# SPACE is released, it keeps a firm grip on the angle
+		gain = DRIFT_ASSIST * (hb_amount if in_handbrake else maxf(hb_amount, 0.6))
 	else:
 		drift_t = 0.0
 		var drive_t: float = fspeed * tan(steering) / WHEELBASE
@@ -558,26 +577,36 @@ func _yaw_assist(delta: float, fspeed: float) -> void:
 	angular_velocity.y = w + (target - w) * clampf(gain * delta, 0.0, 1.0)
 
 
+## Start a drift with SPACE + steering at speed. After SPACE is let go it holds while you keep the gas on
+## and steer into the turn; braking, lifting off, centring the wheel or straightening out ends it.
+func _update_drift(fspeed: float, beta: float) -> void:
+	if not drifting:
+		if hb_amount > 0.25 and absf(in_steer) > 0.5 and fspeed > 10.0:
+			drifting = true
+			drift_dir = signf(in_steer)
+		return
+	var steer_into: bool = in_steer * drift_dir > 0.2
+	var holding: bool = in_handbrake or (in_throttle > 0.05 and steer_into and absf(beta) > 0.12)
+	if linear_velocity.length() < 8.0 or in_brake > 0.05 or not holding:
+		drifting = false
+
+
 func _animate_siren(delta: float) -> void:
 	siren_t += delta
 	var phase: bool = int(siren_t * 7.0) % 2 == 0
-	# far cops: lens glow only, the real lights stay off (the flashing glow reads the same at distance)
-	if cam != null and cam.global_position.distance_squared_to(global_position) > LIGHT_RANGE * LIGHT_RANGE:
-		if model != null:
-			model.set_siren(phase, false)
-			return
-		siren_mats[0].emission_energy_multiplier = 4.0 if phase else 0.2
-		siren_mats[1].emission_energy_multiplier = 0.2 if phase else 4.0
-		siren_lights[0].light_energy = 0.0
-		siren_lights[1].light_energy = 0.0
-		return
+	# Real lights only on the nearest cop (Main's `siren_on`) and only when close: every real light
+	# re-draws everything it touches in this renderer. Other cops flash their lens glow only, which
+	# reads the same at a distance.
+	var real: bool = siren_on and cam != null and cam.global_position.distance_squared_to(global_position) < LIGHT_RANGE * LIGHT_RANGE
 	if model != null:
-		model.set_siren(phase)
+		model.set_siren(phase, real)
 		return
 	siren_mats[0].emission_energy_multiplier = 4.0 if phase else 0.2
 	siren_mats[1].emission_energy_multiplier = 0.2 if phase else 4.0
-	siren_lights[0].light_energy = 3.0 if phase else 0.0
-	siren_lights[1].light_energy = 0.0 if phase else 3.0
+	siren_lights[0].visible = real and phase
+	siren_lights[1].visible = real and not phase
+	siren_lights[0].light_energy = 3.0
+	siren_lights[1].light_energy = 3.0
 
 
 # -------------------------------------------------------------- main update
@@ -648,6 +677,16 @@ func _apply_controls(delta: float, fspeed: float) -> void:
 		brk = 3.0  # rolling resistance / engine braking
 	engine_force = eng * engine_scale
 	brake = brk
+	# Handbrake without steering: rear brake + less power, so it just slows you down (and, with no
+	# slide, earns no nitro). With steering it starts a drift instead (the slide itself costs speed).
+	var straight: float = 0.0 if drifting or absf(in_steer) > 0.3 else hb_amount
+	if straight > 0.0:
+		for w in wheels:
+			if not w.use_as_steering:
+				w.engine_force = 0.0   # Godot ignores a wheel's brake while it has engine force
+				w.brake = brk + HANDBRAKE_FORCE * straight
+			else:
+				w.engine_force = engine_force * lerpf(1.0, HANDBRAKE_ENGINE, straight)
 	_update_nitro(delta, fspeed)
 	_set_handbrake(in_handbrake, delta)
 	_yaw_assist(delta, fspeed)

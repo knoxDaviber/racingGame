@@ -23,7 +23,9 @@ Your finishing place does not matter much. [b]Not getting caught is what counts.
 [b]DRIVING[/b]
 W or UP  =  gas          S or DOWN  =  brake, then reverse
 A / D or LEFT / RIGHT  =  steer
-SPACE  =  handbrake drift (hold it while turning)
+SPACE + steer  =  drift. Keep steering into the turn with gas held and
+   the drift keeps going after you let go of SPACE. Centre the wheel to straighten up.
+SPACE alone (no steering)  =  handbrake: it just slows you down
 SHIFT  =  nitro boost (the blue bar under your speed)
 R  =  put your car back on the road (if you are flipped or stuck)
 ESC or P  =  this menu        ENTER  =  retry after being busted
@@ -36,7 +38,7 @@ Some of the bar carries over to the next leg, so stay clean.
 
 [b]NITRO[/b]
 Each tank lasts about 3 seconds. It refills slowly on its own,
-and [b]fast while you drift[/b]. Use it on straights to get away.
+and [b]fast while you are really sliding sideways[/b] in a drift. Use it on straights to get away.
 
 [b]SHORTCUTS AND DANGER[/b]
 Yellow signs mark dirt shortcuts: shorter, but slippery.

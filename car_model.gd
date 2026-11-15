@@ -17,8 +17,10 @@ extends RefCounted
 # ================================ SETTINGS ================================
 # res:// paths (right-click a file in the FileSystem dock -> Copy Path).
 # Leave "" and the project is searched for a scene that contains the four wheel nodes.
-const COP_MODEL: String = "res://Resources/Models/Cars/PoliceCar/PoliceCar.gltf"
-const ROBBER_MODEL: String = "res://Resources/Models/Cars/RacingCar/RacingCar.gltf"          # player + AI robbers. "" = reuse the cop model (sirens off)
+# *_baked.tscn = the same models with their static parts merged (tools/bake_car.gd): ~10 draw
+# calls per car instead of 50-80. Re-run that tool after changing a .gltf, or point these at the .gltf.
+const COP_MODEL: String = "res://Resources/Models/Cars/PoliceCar/PoliceCar_baked.tscn"
+const ROBBER_MODEL: String = "res://Resources/Models/Cars/RacingCar/RacingCar_baked.tscn"          # player + AI robbers. "" = reuse the cop model (sirens off)
 const MODEL_BY_DRIVER: Dictionary = {}   # optional per-car override, e.g. {"YOU": "res://cars/sport.glb", "COP 2": "res://cars/swat.glb"}
 
 const FIT_TO_HITBOX: bool = true         # scale each model to exactly the hitbox length (4.2 m). false = keep its own size
@@ -238,7 +240,9 @@ func set_siren(phase: bool, lights: bool = true) -> void:
 		for m in rec["mats"]:
 			(m as BaseMaterial3D).emission_energy_multiplier = SIREN_GLOW_ON if on else SIREN_GLOW_OFF
 		for i in range((rec["lights"] as Array).size()):
-			((rec["lights"] as Array)[i] as Light3D).light_energy = (rec["energy"] as Array)[i] if on and lights else 0.0
+			var lt: Light3D = (rec["lights"] as Array)[i]
+			lt.light_energy = (rec["energy"] as Array)[i]
+			lt.visible = on and lights   # hidden, not just dark: a 0-energy light still costs a render pass
 
 
 ## Paint the racer's body paint in its colour. Returns how many surfaces were repainted.

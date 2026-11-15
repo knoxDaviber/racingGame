@@ -66,6 +66,14 @@ var length: float = 0.0
 var count: int = 0
 var spacing: float = 1.0  # average distance between samples (metres)
 
+const VIEW_EXTRA: float = 230.0   # view distance = the map's fog_begin + this (fog is opaque there)
+const CELL: float = 120.0         # scenery is split into CELL x CELL chunks so off-screen / far chunks are skipped
+
+
+## How far the camera sees on this map; fog reaches full strength exactly there.
+func view_dist() -> float:
+	return float(map["fog_begin"]) + VIEW_EXTRA
+
 
 func build() -> void:
 	width = float(map["width"])
@@ -301,21 +309,25 @@ func _make_ground() -> void:
 
 func _make_road() -> void:
 	var half: float = width * 0.5
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	for i in range(count):
-		var j: int = (i + 1) % count
-		var l0: Vector3 = points[i] - right_at(i) * half + Vector3(0, 0.05, 0)
-		var r0: Vector3 = points[i] + right_at(i) * half + Vector3(0, 0.05, 0)
-		var l1: Vector3 = points[j] - right_at(j) * half + Vector3(0, 0.05, 0)
-		var r1: Vector3 = points[j] + right_at(j) * half + Vector3(0, 0.05, 0)
-		for v in [l0, l1, r0, r0, l1, r1]:  # clockwise seen from above = front face up
-			st.set_normal(Vector3.UP)
-			st.add_vertex(v)
-	var mi := MeshInstance3D.new()
-	mi.mesh = st.commit()
-	mi.material_override = _mat(map["road"], 0.8)
-	add_child(mi)
+	var road_mat: StandardMaterial3D = _mat(map["road"], 0.8)
+	# one mesh per ~CELL metres of road, so the camera and lights skip the pieces they can't reach
+	var per: int = maxi(1, int(CELL / spacing))
+	for c0 in range(0, count, per):
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		for i in range(c0, mini(c0 + per, count)):
+			var j: int = (i + 1) % count
+			var l0: Vector3 = points[i] - right_at(i) * half + Vector3(0, 0.05, 0)
+			var r0: Vector3 = points[i] + right_at(i) * half + Vector3(0, 0.05, 0)
+			var l1: Vector3 = points[j] - right_at(j) * half + Vector3(0, 0.05, 0)
+			var r1: Vector3 = points[j] + right_at(j) * half + Vector3(0, 0.05, 0)
+			for v in [l0, l1, r0, r0, l1, r1]:  # clockwise seen from above = front face up
+				st.set_normal(Vector3.UP)
+				st.add_vertex(v)
+		var mi := MeshInstance3D.new()
+		mi.mesh = st.commit()
+		mi.material_override = road_mat
+		add_child(mi)
 
 	# Dashed centre line + solid edge lines, as thin boxes.
 	# Dashed centre line: one MultiMesh (a draw call) instead of a node per dash.
@@ -590,17 +602,29 @@ func _add_multimesh(mesh: Mesh, mat: Material, items: Array, y_lift: float) -> v
 	_add_multimesh_xf(mesh, mat, xfs)
 
 
-## One MultiMesh (a single draw call) for many copies of `mesh`.
+## Many copies of `mesh`, one MultiMesh (one draw call) per CELL-sized chunk of the map. A single
+## track-wide MultiMesh can never be culled; chunks behind the camera or past the fog are not drawn.
 func _add_multimesh_xf(mesh: Mesh, mat: Material, xfs: Array) -> void:
-	if xfs.is_empty():
-		return
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.mesh = mesh
-	mm.instance_count = xfs.size()
-	for n in range(xfs.size()):
-		mm.set_instance_transform(n, xfs[n])
-	var mi := MultiMeshInstance3D.new()
-	mi.multimesh = mm
-	mi.material_override = mat
-	add_child(mi)
+	var cells: Dictionary = {}
+	for xf in xfs:
+		var key := Vector2i(floori(xf.origin.x / CELL), floori(xf.origin.z / CELL))
+		if not cells.has(key):
+			cells[key] = []
+		cells[key].append(xf)
+	var reach: float = view_dist() + CELL * 0.75   # chunk centre to its far corner, plus tall objects
+	for key in cells:
+		var list: Array = cells[key]
+		var centre := Vector3((key.x + 0.5) * CELL, 0.0, (key.y + 0.5) * CELL)
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = mesh
+		mm.instance_count = list.size()
+		for n in range(list.size()):
+			var xf: Transform3D = list[n]
+			mm.set_instance_transform(n, Transform3D(xf.basis, xf.origin - centre))
+		var mi := MultiMeshInstance3D.new()
+		mi.multimesh = mm
+		mi.material_override = mat
+		mi.position = centre
+		mi.visibility_range_end = reach
+		add_child(mi)
