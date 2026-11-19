@@ -2,7 +2,7 @@ extends Control
 ## Tiny top-down map: the circuit outline plus a dot per car.
 
 var track = null
-var items: Array = []  # each entry: [node, colour]
+var items: Array = []  # each entry: [node, colour] or [node, colour, true] for your own car (drawn with a white ring)
 var pts: PackedVector2Array = PackedVector2Array()
 var sc_lines: Array = []   # one PackedVector2Array per shortcut
 var scale_f: float = 1.0
@@ -45,7 +45,10 @@ func _draw() -> void:
 		draw_polyline(line, Color(0.8, 0.6, 0.3, 0.9), 2.0)
 	for it in items:
 		var n = it[0]
-		if is_instance_valid(n):
+		if is_instance_valid(n) and n.visible:
 			var q := Vector2(n.global_position.x, n.global_position.z) * scale_f + offset
+			if it.size() > 2 and it[2]:
+				draw_circle(q, 9.0, Color(1, 1, 1, 0.95))
+				draw_circle(q, 7.5, Color(0, 0, 0, 0.85))
 			draw_circle(q, 5.5, Color(0, 0, 0, 0.8))
 			draw_circle(q, 4.0, it[1])

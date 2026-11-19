@@ -1,18 +1,22 @@
 extends Node3D
-## Cops & Robbers racer v0.2: set-up, race flow, camera, FX and HUD.
+## Cops & Robbers racer: set-up, match flow, camera, FX and HUD.
 ##
-## One escape in four legs (track.gd MAPS), each harder than the last. You and three AI
-## robbers race each leg; cop cars hunt whichever robber is closest. Every robber has an
-## ARREST bar that fills while a cop is near; a full bar = busted (out for the rest of the run).
-## Finish the last leg to escape.
+## Boot: calibrate the car, warm up the shaders, then the main menu (menu.gd). A match is four levels (track.gd MAPS),
+## each harder than the last, played as a RACER (you + three AI racers, the cops hunt everybody) or as a COP
+## (you + AI backup cops chase four AI racers). Every racer has an ARREST bar that fills while a cop is near; a full
+## bar = busted. Game modes: STORY (a place to reach per level) and POINTS (points per level, eliminations,
+## cop strikes and two rankings: all of that lives in rules.gd). Results screens: results_view.gd.
 
-const VERSION: String = "v0.2"
+const VERSION: String = "v0.4.2"
 
 const TrackScript = preload("res://track.gd")
 const CarScript = preload("res://car.gd")
 const MinimapScript = preload("res://minimap.gd")
 const SpeedFxScript = preload("res://speedfx.gd")
 const MenuScript = preload("res://menu.gd")
+const MarkersScript = preload("res://markers.gd")
+const RulesScript = preload("res://rules.gd")
+const ResultsScript = preload("res://results_view.gd")
 
 ## Shown one at a time during each countdown.
 const TIPS: Array = [
@@ -26,9 +30,33 @@ const TIPS: Array = [
 	"Press ESC (or P) any time for the menu, settings and how to play.",
 ]
 
+## Tips shown during the countdown when you play as the cop.
+const COP_TIPS: Array = [
+	"Stay within 12 m of a racer and its ARREST bar fills. Full bar = busted!",
+	"Racers are the coloured dots on the minimap (top right). Your own dot has a white ring.",
+	"SHIFT = nitro boost. Use it on straights to catch up, then drift to refill it.",
+	"A bust by another cop breaks your strike. Keep busting racers yourself and every bust scores more.",
+	"Dispatch drops spike strips and roadblocks ahead of the racers. Spikes can't hurt cops.",
+	"The cops need a minimum number of busts every level. Check NEED at the top left.",
+	"Flipped over or stuck? Press R. Press F to turn the siren sound off.",
+	"ESC or P = pause menu. G = Garage.",
+]
+
+## Tips for the points race (racer side).
+const POINTS_TIPS: Array = [
+	"Every place pays points: 1st 10, 2nd 7, 3rd 4, 4th 2. Getting busted pays nothing.",
+	"The red ARREST bar fills when a cop is close. Full bar = busted = 0 points. Drive away from them!",
+	"Cops are the blue dots on the minimap (top right).",
+	"Hold SPACE while turning to drift. Drifting refills your nitro fast.",
+	"SHIFT = nitro boost. Use it on straights to get away from cops.",
+	"Yellow signs mark dirt shortcuts: shorter, but slippery.",
+	"Flipped over or stuck? Press R.",
+	"When your own race is over, press ENTER to skip ahead to the results.",
+	"Eliminated racers keep their points, so they can still beat the survivors in the points ranking.",
+]
+
 const COUNTDOWN_TIME: float = 3.0
 const ARREST_GRACE: float = 6.0  # no arrests this early in a leg
-const ARREST_CARRY: float = 0.5  # share of each arrest bar carried into the next leg
 
 ## Difficulty per leg (same order as track.gd MAPS):
 ## laps, cops, cop cruise speed, cop top speed, cop start delay (s), obstacle every (s, 0 = none), arrest fill rate
@@ -40,7 +68,9 @@ const LEGS: Array = [
 ]
 enum Obs { SPIKES, BARRICADE }
 
-enum State { SETTLE, TEST, LOADING, COUNTDOWN, RACING, BUSTED, ESCAPED, PTEST, LEG_CLEAR }
+# TITLE = main menu. BUSTED = level failed (ENTER retries). ESCAPED = story won. RESULTS = points screen after a level.
+# FINAL = end-of-match standings.
+enum State { SETTLE, TEST, LOADING, TITLE, COUNTDOWN, RACING, BUSTED, ESCAPED, PTEST, LEG_CLEAR, RESULTS, FINAL }
 
 # name, colour, AI cruising speed (m/s), lane offset
 const ROBBERS: Array = [
@@ -53,12 +83,43 @@ const GRID: Array = [[1, -3.5], [1, 3.5], [3, -3.5], [3, 3.5]]
 const PLAYER_SLOT: int = 2
 const AI_SLOTS: Array = [0, 1, 3]
 const COP_GRID: Array = [[10, 2.5], [13, -2.5], [16, 2.5], [19, -2.5]]
+# --- cop side: you drive the police car and bust the racers (pick the side on the New Game page) ---
+# The four AI racers: name, colour, AI cruising speed (m/s), lane offset. They take the whole starting grid.
+const COP_ROBBERS: Array = [
+	["BLAZE", Color(1.0, 0.45, 0.08), 41.0, -3.0],
+	["GHOST", Color(0.2, 0.85, 0.95), 39.0, 3.0],
+	["VIPER", Color(0.35, 0.9, 0.25), 37.0, 0.0],
+	["RAVEN", Color(0.72, 0.3, 0.95), 38.0, 1.5],
+]
+const COP_AI_SLOTS: Array = [0, 1, 2, 3]
+const COP_PLAYER_SLOT: Array = [5, 0.0]   # your police car: samples behind the line, lateral metres (just behind the pack)
+## Difficulty per level in the cop modes (same order as LEGS): laps, backup cops (AI), speed bonus for the racers (m/s).
+## Cop speeds, arrest rate and obstacles still come from LEGS. How many busts the cops need comes from rules.gd.
+const COP_LEGS: Array = [
+	[3, 1, 0.0],
+	[3, 1, 1.0],
+	[3, 2, 2.0],
+	[3, 2, 3.0],
+]
+const WAIT_AFTER_YOU: float = 15.0   # points race: seconds the others get to finish after your own race is over (ENTER skips)
+const COP_LEVEL_CAP: float = 360.0   # cop side: a racer still on the road after this long counts as having got away
 
 var state: int = State.SETTLE
 var track = null
 var player = null
-var racers: Array = []      # player first, then AI robbers
-var cops: Array = []
+var racers: Array = []      # the racers in THIS level (eliminated ones are left out)
+var all_racers: Array = []  # every racer car of the match, eliminated or not
+var cops: Array = []        # the AI cops (in cop mode your own police car is cops[0])
+var cop_mode: bool = false  # true = you drive the police car and bust the racers (set on the New Game page)
+var story: bool = false     # racer side, story mode: a place to reach per level, no points
+var rules                   # rules.gd: points, eliminations, cop strikes, rankings (points modes)
+var rules_snap: Dictionary = {}   # rules state at the start of the level (for retries)
+var results_view            # results_view.gd
+var title_next: bool = false      # after the next load / leg start go to the main menu, not the countdown
+var built_leg: int = -1           # the level the current track was built for
+var start_leg: int = 0
+var wait_t: float = 0.0           # points race: seconds since your own race ended
+var target_racer = null     # cop mode: the racer closest to you (the arrest bar shows it)
 var finish_order: Array = []
 var cam: Camera3D
 var cam_dir: Vector3 = Vector3(1, 0, 0)
@@ -128,6 +189,8 @@ var lbl_msg: Label
 var lbl_sub: Label
 var lbl_ver: Label
 var bar: ProgressBar
+var bar_fill: StyleBoxFlat
+var markers: Control        # cop mode: name tags over the racers
 var minimap: Control
 var bottom: VBoxContainer
 var hint: Label
@@ -157,15 +220,37 @@ func _ready() -> void:
 	_build_world()
 	if tune.has("leg"):
 		leg = clampi(int(tune["leg"]), 0, LEGS.size() - 1)
+	start_leg = leg
+
+	rules = RulesScript.new()
+	results_view = ResultsScript.new()
+	add_child(results_view)
+	menu = MenuScript.new()   # first: it loads the saved settings, car colour and the last match set-up
+	add_child(menu)
+	menu.version = VERSION
+	menu.retry.connect(_restart)
+	menu.new_run.connect(_restart_match)
+	menu.closed.connect(_on_menu_closed)
+	menu.start_requested.connect(_begin_match)
+	menu.to_title_requested.connect(_to_title)
+	cop_mode = String(menu.cfg["role"]) == "cop"
+	if autotest or tune.has("role"):   # tests don't depend on the saved setting: add role=cop to test cop mode
+		cop_mode = String(tune.get("role", "robber")) == "cop"
+	if ptest != "" or OS.get_cmdline_user_args().has("solo"):
+		cop_mode = false
+	title_next = not autotest and ptest == ""   # tests start a match right away
+	story = autotest or ptest != ""             # tests use the story rules unless they ask for role=cop / mode=points
 	_make_track()
 
-	player = _new_car(0, Color(1.0, 0.8, 0.05), 38.0, "YOU", GRID[PLAYER_SLOT][0], GRID[PLAYER_SLOT][1])
+	# The start-up calibration car: always a getaway car. _build_field() replaces it with the real field.
+	player = _new_car(0, menu.cfg["car_color"], 38.0, "YOU", GRID[PLAYER_SLOT][0], GRID[PLAYER_SLOT][1])
 	player.set_meta("slot", PLAYER_SLOT)
 	player.auto_drive = autotest
 	if tune.has("pspeed"):
 		player.ai_speed = float(tune["pspeed"])
 	player.calibrating = true
 	racers.append(player)
+	all_racers.append(player)
 
 	cam = Camera3D.new()
 	cam.far = 500.0     # set per map in _apply_map (fog is opaque just before it)
@@ -179,10 +264,7 @@ func _ready() -> void:
 	_build_loading_ui()
 
 	_build_hud()
-	menu = MenuScript.new()
-	add_child(menu)
-	menu.retry.connect(_restart)
-	menu.new_run.connect(func(): _goto_leg(0, true))
+	_apply_role_ui()
 	_apply_map()
 	lbl_msg.text = "WARMING UP"
 	lbl_sub.text = ""
@@ -252,12 +334,19 @@ func _make_track() -> void:
 	add_child(track)
 	track.build()
 	warmed_map = -1   # new materials: compile again
-	laps = int(LEGS[leg][0])
-	total_progress = float(laps * track.count)
-	for c in racers + cops:
+	built_leg = leg
+	_set_laps()
+	for c in all_racers + cops:
 		c.track = track
 	if minimap != null:
 		minimap.setup(track)
+
+
+## Laps of the current level (the cop modes run longer levels: there is more time to catch the racers).
+func _set_laps() -> void:
+	var table: Array = COP_LEGS if cop_mode else LEGS
+	laps = int(table[leg][0])
+	total_progress = float(laps * track.count)
 
 
 ## Wind streaks in 3D: a ring of thin boxes flying past the camera (in camera space) at speed.
@@ -303,14 +392,15 @@ func _play(n: String) -> void:
 	sfx[n].play()
 
 
-## kind: 0 = player, 1 = AI robber, 2 = cop.  back/lateral = starting grid slot.
+## kind: 0 = player (getaway car), 1 = AI robber, 2 = AI cop, 3 = player (police car, cop mode).
+## back/lateral = starting grid slot.
 ## The start transform must be set BEFORE add_child (teleporting a body in the same
 ## frame it is created does not stick).
 func _new_car(kind: int, color: Color, ai_speed: float, car_name: String, back: int, lateral: float):
 	var car = CarScript.new()
 	car.track = track
-	car.is_player = (kind == 0)
-	car.is_cop = (kind == 2)
+	car.is_player = (kind == 0 or kind == 3)
+	car.is_cop = (kind == 2 or kind == 3)
 	car.body_color = color
 	car.driver_name = car_name
 	car.name = car_name
@@ -342,6 +432,7 @@ func _place_state(car, back: int) -> void:
 	car.arrest = 0.0
 	car.busted = false
 	car.finished = false
+	car.gone = false
 	if car.is_inside_tree():
 		car.set_ghost(false)
 	car.pace = 1.0
@@ -365,6 +456,10 @@ func _build_hud() -> void:
 
 	fx = SpeedFxScript.new()
 	hud.add_child(fx)
+	markers = MarkersScript.new()   # cop mode: name tags over the racers
+	markers.cam = cam
+	markers.racers = racers
+	hud.add_child(markers)
 
 	var tl := VBoxContainer.new()
 	tl.position = Vector2(22, 14)
@@ -392,11 +487,11 @@ func _build_hud() -> void:
 	bar.max_value = 100.0
 	bar.show_percentage = false
 	bar.custom_minimum_size = Vector2(460, 22)
-	var fill := StyleBoxFlat.new()
-	fill.bg_color = Color(0.9, 0.15, 0.15)
+	bar_fill = StyleBoxFlat.new()   # red for robbers, green for cops (see _apply_role_ui)
+	bar_fill.bg_color = Color(0.9, 0.15, 0.15)
 	var back := StyleBoxFlat.new()
 	back.bg_color = Color(0, 0, 0, 0.55)
-	bar.add_theme_stylebox_override("fill", fill)
+	bar.add_theme_stylebox_override("fill", bar_fill)
 	bar.add_theme_stylebox_override("background", back)
 	bottom.add_child(bar)
 	nbar = ProgressBar.new()
@@ -439,6 +534,8 @@ func _build_hud() -> void:
 func _layout_hud() -> void:
 	var vp: Vector2 = get_viewport().get_visible_rect().size
 	fx.size = vp
+	markers.size = vp
+	markers.active = cop_mode and state >= State.COUNTDOWN
 	minimap.position = Vector2(vp.x - minimap.custom_minimum_size.x - 16.0, 16.0)
 	bottom.size = Vector2(460, 0)
 	bottom.position = Vector2((vp.x - 460.0) * 0.5, vp.y - bottom.get_combined_minimum_size().y - 44.0)
@@ -481,28 +578,37 @@ func _standings() -> Array:
 
 
 func _update_hud() -> void:
-	var lap: int = clampi(int(floorf(player.prog / float(track.count))) + 1, 1, laps)
-	lbl_lap.text = "LEG %d/%d  %s   LAP %d/%d" % [leg + 1, LEGS.size(), track.map["name"], lap, laps]
-	var order: Array = _standings()
-	lbl_pos.text = "POSITION  %d / %d" % [order.find(player) + 1, order.size()]
-	lbl_time.text = "TIME  " + _time_str(race_time)
-	lbl_cop.text = "NEAREST COP  %d m" % int(nearest_cop)
-	lbl_cop.add_theme_color_override("font_color", Color(1, 0.4, 0.35) if nearest_cop < 25.0 else Color.WHITE)
-	var board: String = ""
-	for i in range(order.size()):
-		var r = order[i]
-		var tag: String = ""
-		if r.busted:
-			tag = "  BUSTED"
-		elif r.finished:
-			tag = "  ESCAPED"
-		board += "%d. %s%s\n" % [i + 1, r.driver_name, tag]
-	lbl_board.text = board.strip_edges()
+	if cop_mode:
+		_update_cop_hud()
+	else:
+		var lap: int = clampi(int(floorf(player.prog / float(track.count))) + 1, 1, laps)
+		lbl_lap.text = "LEVEL %d/%d  %s   LAP %d/%d" % [leg + 1, LEGS.size(), track.map["name"], lap, laps]
+		var order: Array = _standings()
+		lbl_pos.text = "POSITION  %d / %d" % [order.find(player) + 1, order.size()]
+		if rules.active:
+			lbl_pos.text += "     %d PTS" % rules.racer_points(player.driver_name)
+		elif story and leg > 0:
+			lbl_pos.text += "     NEED TOP %d" % int(RulesScript.STORY_MAX_PLACE[leg])
+		lbl_time.text = "TIME  " + _time_str(race_time)
+		lbl_cop.text = "NEAREST COP  %d m" % int(nearest_cop)
+		lbl_cop.add_theme_color_override("font_color", Color(1, 0.4, 0.35) if nearest_cop < 25.0 else Color.WHITE)
+		var board: String = ""
+		for i in range(order.size()):
+			var r = order[i]
+			var tag: String = ""
+			if r.busted:
+				tag = "  BUSTED"
+			elif r.finished:
+				tag = "  ESCAPED"
+			if rules.active:
+				tag += "  (%d)" % rules.racer_points(r.driver_name)
+			board += "%d. %s%s\n" % [i + 1, r.driver_name, tag]
+		lbl_board.text = board.strip_edges()
+		bar.value = player.arrest
+		lbl_arrest.text = "ARREST  %d%%" % int(player.arrest)
 	var kmh: float = absf(player.forward_speed()) * 3.6
 	lbl_speed.text = ("%d mph" % int(kmh * 0.621)) if menu.cfg["mph"] else ("%d km/h" % int(kmh))
-	bar.value = player.arrest
 	nbar.value = player.nitro
-	lbl_arrest.text = "ARREST  %d%%" % int(player.arrest)
 	warn_t -= get_physics_process_delta_time()
 	if warn_t <= 0.0:
 		lbl_warn.text = ""
@@ -511,13 +617,58 @@ func _update_hud() -> void:
 		lbl_tip.text = ""
 
 
+## Cop mode: how many racers are busted / got away, the racer closest to you, and its arrest bar.
+func _update_cop_hud() -> void:
+	var lead = null
+	for r in racers:
+		if not r.busted and not r.finished and (lead == null or r.prog > lead.prog):
+			lead = r
+	var lap: int = laps
+	if lead != null:
+		lap = clampi(int(floorf(lead.prog / float(track.count))) + 1, 1, laps)
+	lbl_lap.text = "LEVEL %d/%d  %s   LEAD RACER LAP %d/%d" % [leg + 1, LEGS.size(), track.map["name"], lap, laps]
+	lbl_pos.text = "BUSTED  %d / %d     NEED  %d     YOUR PTS  %s" % [_count_busted(), racers.size(), rules.cop_required(), RulesScript.fmt(rules.cop_points("YOU"))]
+	lbl_time.text = "TIME  " + _time_str(race_time)
+	target_racer = null
+	var best: float = INF
+	for r in racers:
+		if r.busted or r.finished:
+			continue
+		var d: float = player.global_position.distance_to(r.global_position)
+		if d < best:
+			best = d
+			target_racer = r
+	if target_racer != null:
+		lbl_cop.text = "NEAREST RACER  %s  %d m" % [target_racer.driver_name, int(best)]
+		lbl_cop.add_theme_color_override("font_color", Color(0.5, 1.0, 0.5) if best < 25.0 else Color.WHITE)
+	else:
+		lbl_cop.text = ""
+	var board: String = ""
+	var order: Array = _standings()
+	for i in range(order.size()):
+		var r = order[i]
+		var tag: String = "  %d%%" % int(r.arrest)
+		if r.busted:
+			tag = "  BUSTED"
+		elif r.finished:
+			tag = "  GOT AWAY"
+		board += "%d. %s%s\n" % [i + 1, r.driver_name, tag]
+	board += "\nCOPS"
+	for n in rules.cop_board_points():   # the other cops compete with you
+		board += "\n%s   %s pts   %d busts" % [n, RulesScript.fmt(rules.cop_points(n)), rules.cop_elims(n)]
+	lbl_board.text = board.strip_edges()
+	if target_racer != null and best < 45.0:
+		bar.value = target_racer.arrest
+		lbl_arrest.text = "ARRESTING  %s  %d%%" % [target_racer.driver_name, int(target_racer.arrest)]
+	else:
+		bar.value = 0.0
+		lbl_arrest.text = "NO RACER IN REACH"
+
+
 # ------------------------------------------------------------------ main loop
 func _physics_process(delta: float) -> void:
 	sim_time += delta
 	menu.can_pause = not autotest and ptest == "" and state >= State.COUNTDOWN
-	if menu.can_pause and not menu.cfg["seen_help"]:   # first launch: explain the game before the first race
-		menu.cfg["seen_help"] = true
-		menu.open("help")
 	if state < State.LOADING:   # start-up calibration fills the first part of the loading bar
 		load_bar.value = minf(15.0, load_bar.value + delta * 8.0)
 	match state:
@@ -535,6 +686,10 @@ func _physics_process(delta: float) -> void:
 			_state_over(delta)
 		State.LEG_CLEAR:
 			_state_leg_clear(delta)
+		State.RESULTS:
+			_state_results(delta)
+		State.FINAL:
+			_state_final(delta)
 		State.PTEST:
 			_state_ptest(delta)
 	if state != State.LOADING:
@@ -590,14 +745,12 @@ func _state_test(delta: float) -> void:
 
 ## 3) spawn the rest of the field and put everyone on the grid
 func _build_field() -> void:
-	if ptest == "" and not OS.get_cmdline_user_args().has("solo"):
-		for k in range(ROBBERS.size()):
-			var spec: Array = ROBBERS[k]
-			var slot: Array = GRID[AI_SLOTS[k]]
-			var ai = _new_car(1, spec[1], spec[2], spec[0], slot[0], slot[1])
-			ai.lane = spec[3]
-			ai.set_meta("slot", AI_SLOTS[k])
-			racers.append(ai)
+	var solo: bool = OS.get_cmdline_user_args().has("solo")
+	if autotest and ptest == "" and not solo:
+		_begin_match()   # tests start a match right away (no main menu); this builds the field too
+		return
+	if ptest == "" and not solo:
+		_spawn_field()
 	elif ptest != "":
 		track.get_node("Walls").queue_free()
 	_start_leg()
@@ -605,31 +758,147 @@ func _build_field() -> void:
 		state = State.PTEST
 
 
+## Throw away every car (the start-up calibration car too) and build the field for the current side: your car (the
+## getaway car in your colour, or the police car in cop mode) plus the AI racers. You are a racer: ROBBERS fill the
+## grid around you. You are the cop: all four racers (COP_ROBBERS) are AI and take the whole grid.
+func _spawn_field() -> void:
+	for c in all_racers + cops:
+		if is_instance_valid(c):
+			remove_child(c)
+			c.queue_free()
+	racers.clear()
+	all_racers.clear()
+	cops.clear()
+	if cop_mode:
+		player = _new_car(3, Color.WHITE, 38.0, "YOU", COP_PLAYER_SLOT[0], COP_PLAYER_SLOT[1])
+	else:
+		player = _new_car(0, menu.cfg["car_color"], 38.0, "YOU", GRID[PLAYER_SLOT][0], GRID[PLAYER_SLOT][1])
+		player.set_meta("slot", PLAYER_SLOT)
+		all_racers.append(player)
+	player.auto_drive = autotest
+	if tune.has("pspeed"):
+		player.ai_speed = float(tune["pspeed"])
+	markers.me = player
+	var specs: Array = COP_ROBBERS if cop_mode else ROBBERS
+	var slots: Array = COP_AI_SLOTS if cop_mode else AI_SLOTS
+	for k in range(specs.size()):
+		var spec: Array = specs[k]
+		var slot: Array = GRID[slots[k]]
+		var ai = _new_car(1, spec[1], spec[2], spec[0], slot[0], slot[1])
+		ai.lane = spec[3]
+		ai.set_meta("slot", slots[k])
+		ai.set_meta("base_speed", spec[2])
+		all_racers.append(ai)
+	for r in all_racers:
+		racers.append(r)
+
+
+## The pause menu closed (Garage): a new car colour repaints your car (and its minimap dot) at once.
+func _on_menu_closed() -> void:
+	if player != null and not cop_mode:
+		player.set_body_color(menu.cfg["car_color"])
+		_refresh_minimap()
+
+
+## Everything on screen that depends on the role: the controls line, the arrest bar colour, the tags over the racers.
+func _apply_role_ui() -> void:
+	if cop_mode:
+		hint.text = "W/S  gas / brake     A/D  steer     SPACE  drift (refills nitro)     SHIFT  nitro     F  siren sound     R  reset     G  garage     ESC  menu / help"
+		bar_fill.bg_color = Color(0.2, 0.8, 0.35)
+		lbl_arrest.add_theme_color_override("font_color", Color(0.55, 1.0, 0.6))
+	else:
+		hint.text = "W/S  gas / brake     A/D  steer     SPACE  drift (refills nitro)     SHIFT  nitro     R  reset     G  garage     ESC  menu / help"
+		bar_fill.bg_color = Color(0.9, 0.15, 0.15)
+		lbl_arrest.add_theme_color_override("font_color", Color(1.0, 0.45, 0.4))
+	markers.active = cop_mode
+
+
+## The minimap dots: racers in their own colour, cops in blue. Your own dot gets a white ring.
+func _refresh_minimap() -> void:
+	var items: Array = []
+	for r in racers:
+		items.append([r, r.body_color, r == player])
+	for c in cops:
+		items.append([c, Color(0.3, 0.55, 1.0), c == player])
+	minimap.items = items
+
+
+## Grid slots for the racers of this level. `order` = the racers best first (the previous level's result): they line up
+## front to back. Without an order (the first level) you start in the middle of the pack, or, as the cop, the four
+## AI racers take the whole grid.
+func _assign_slots(order: Array = []) -> void:
+	if not order.is_empty():
+		for k in range(order.size()):
+			order[k].set_meta("slot", mini(k, GRID.size() - 1))
+	elif cop_mode:
+		for k in range(racers.size()):
+			racers[k].set_meta("slot", COP_AI_SLOTS[mini(k, COP_AI_SLOTS.size() - 1)])
+	else:
+		player.set_meta("slot", PLAYER_SLOT)
+		var k: int = 0
+		for r in racers:
+			if r != player:
+				r.set_meta("slot", AI_SLOTS[mini(k, AI_SLOTS.size() - 1)])
+				k += 1
+
+
+## Starting slot [samples behind the line, lateral metres] of cops[k]. In cop mode cops[0] is your police car,
+## right behind the racers; the backup cops line up further back (COP_GRID).
+func _cop_slot(k: int) -> Array:
+	if cop_mode:
+		return COP_PLAYER_SLOT if k == 0 else COP_GRID[k - 1]
+	return COP_GRID[k]
+
+
+func _count_busted() -> int:
+	var n: int = 0
+	for r in racers:
+		if r.busted:
+			n += 1
+	return n
+
+
+func _count_away() -> int:
+	var n: int = 0
+	for r in racers:
+		if r.finished and not r.busted:
+			n += 1
+	return n
+
+
 ## Cops for this leg (more, faster, earlier each leg), the minimap, lights, then the grid.
 func _start_leg() -> void:
 	for c in cops:
+		if c == player:
+			continue   # your police car (cop mode) stays for the whole run
 		remove_child(c)
 		c.queue_free()
 	cops.clear()
+	if cop_mode:
+		cops.append(player)
 	if ptest == "" and not OS.get_cmdline_user_args().has("solo"):
-		for k in range(int(LEGS[leg][1])):
+		var backup: int = int(COP_LEGS[leg][1]) if cop_mode else int(LEGS[leg][1])
+		for k in range(backup):
 			var cop = _new_car(2, Color.WHITE, LEGS[leg][2], "COP %d" % (k + 1), COP_GRID[k][0], COP_GRID[k][1])
 			cop.top_speed = LEGS[leg][3]
 			cop.lane = COP_GRID[k][1] * 0.6
 			cops.append(cop)
+	racers.clear()   # the racers of this level: everybody who is not eliminated
+	for r in all_racers:
+		var out: bool = rules.is_out(r.driver_name)
+		r.visible = not out
+		r.process_mode = Node.PROCESS_MODE_DISABLED if out else Node.PROCESS_MODE_INHERIT
+		if not out:
+			racers.append(r)
+	if cop_mode:   # the racers get quicker level by level
+		for r in racers:
+			r.ai_speed = float(r.get_meta("base_speed", 38.0)) + float(COP_LEGS[leg][2])
 	for o in obstacles:
 		if is_instance_valid(o["node"]):
 			o["node"].queue_free()
 	obstacles.clear()
 	obs_t = LEGS[leg][5]
-	var items: Array = []
-	for r in racers:
-		items.append([r, r.body_color])
-		r.visible = not r.busted   # robbers busted on an earlier leg sit the rest of the run out
-		r.process_mode = Node.PROCESS_MODE_INHERIT if not r.busted else Node.PROCESS_MODE_DISABLED
-	for c in cops:
-		items.append([c, Color(0.3, 0.55, 1.0)])
-	minimap.items = items
+	_refresh_minimap()
 	_apply_map()
 	leg_snapshot.clear()
 	for r in racers:
@@ -643,6 +912,15 @@ func _start_leg() -> void:
 		_begin_loading()
 	else:
 		load_layer.visible = false
+		_after_load()
+
+
+## The level is built and its shaders are warm: on to the main menu (boot, or back from a match) or the countdown.
+func _after_load() -> void:
+	if title_next:
+		title_next = false
+		_enter_title()
+	else:
 		state = State.COUNTDOWN
 		_begin_countdown()
 
@@ -661,9 +939,12 @@ func _reset_grid() -> void:
 		r.set_ghost(r.busted)
 	for k in range(cops.size()):
 		var c = cops[k]
-		c.teleport(_grid_transform(c, COP_GRID[k][0], COP_GRID[k][1]))
-		_place_state(c, COP_GRID[k][0])
+		var slot: Array = _cop_slot(k)
+		c.teleport(_grid_transform(c, slot[0], slot[1]))
+		_place_state(c, slot[0])
 		c.target_car = null
+		c.nitro = 1.0
+		c.spiked_t = 0.0
 
 
 func _begin_countdown() -> void:
@@ -677,19 +958,30 @@ func _begin_countdown() -> void:
 	wrong_t = 0.0
 	stuck_t = 0.0
 	last_prog = player.prog
-	lbl_tip.text = ("TIP: " + TIPS[randi() % TIPS.size()]) if menu.cfg["tips"] else ""
+	wait_t = 0.0
+	hud.visible = true
+	results_view.hide_screen()
+	var tips: Array = COP_TIPS if cop_mode else TIPS
+	if rules.active and not cop_mode:
+		tips = POINTS_TIPS
+	var tip: String = ("TIP: " + tips[randi() % tips.size()]) if menu.cfg["tips"] else ""
+	var rule: String = rules.rules_line() if rules.active else _story_line()
+	lbl_tip.text = (rule + "\n" + tip).strip_edges()
 	lbl_msg.add_theme_color_override("font_color", Color(1, 0.95, 0.5))
 	cam_dir = player.forward_world()
 	cam_dir.y = 0.0
 	cam_dir = cam_dir.normalized()
 
 
-## Busted: retry this leg as it started. Escaped: a fresh run from leg 1. No reload, no recalibration.
+## A failed level (story, or too few busts as the cop) is retried as it started; the points are restored too.
+## A won story goes back to the main menu. No reload, no recalibration.
 func _restart() -> void:
 	tip_t = 0.0
 	if state == State.ESCAPED:
-		_goto_leg(0, true)
+		_to_title()
 		return
+	if rules.active:
+		rules.restore(rules_snap)
 	run_time = leg_start_time
 	for r in racers:   # undo whatever happened during the failed attempt
 		var s: Array = leg_snapshot[r]
@@ -699,26 +991,127 @@ func _restart() -> void:
 	_start_leg()
 
 
-## Load a leg's map. `fresh` = new run (everyone back, bars empty, original grid).
+## Load a level's map and set the grid up. `fresh` = the first level of a match (original grid, clock at zero).
+## Every level starts with all remaining racers back on the road and their arrest bars empty.
 func _goto_leg(i: int, fresh: bool) -> void:
-	var order: Array = _standings()
+	var order: Array = []   # the racers best first (last level's result), for the grid
+	if not fresh:
+		if rules.active:
+			for n in rules.last_rank:
+				for r in all_racers:
+					if r.driver_name == n and not rules.is_out(n):
+						order.append(r)
+		else:
+			order = _standings()
 	leg = i
-	_make_track()
+	if i != built_leg:
+		_make_track()
+	_set_laps()
 	if fresh:
 		run_time = 0.0
-		for r in racers:
-			r.busted = false
-			r.arrest = 0.0
-		player.set_meta("slot", PLAYER_SLOT)
-		for k in range(1, racers.size()):
-			racers[k].set_meta("slot", AI_SLOTS[k - 1])
-	else:
-		# grid in finishing order; arrest bars carry over in part
-		var s: int = 0
-		for r in order:
-			r.set_meta("slot", s)
-			s += 1
-			r.arrest *= ARREST_CARRY
+	for r in all_racers:
+		r.busted = false
+		r.arrest = 0.0
+	if rules.active:
+		rules.begin_level(i, _scoring_cops())
+		rules_snap = rules.snapshot()
+		for r in all_racers:   # eliminated racers are not on the grid
+			if rules.is_out(r.driver_name):
+				order.erase(r)
+	_assign_slots(order)
+	_start_leg()
+
+
+# ------------------------------------------------------------------ the match
+## START on the New Game page (the tests call it straight away): build the field for the chosen side and play level 1.
+func _begin_match() -> void:
+	cop_mode = String(menu.cfg["role"]) == "cop"
+	var mode: String = String(menu.cfg["mode"])
+	if autotest:   # tests: role=cop / mode=points / elim_last=1 ... on the command line (default: the story rules)
+		cop_mode = String(tune.get("role", "robber")) == "cop"
+		mode = String(tune.get("mode", "points" if cop_mode else "story"))
+	story = (not cop_mode) and mode == "story"
+	title_next = false
+	_apply_role_ui()
+	_spawn_field()
+	rules.reset()
+	if not story:
+		rules.start_match(_match_config(), _racer_specs())
+	results_view.hide_screen()
+	_goto_leg(start_leg, true)
+
+
+func _restart_match() -> void:
+	_begin_match()
+
+
+## The settings of this match for rules.gd (from the New Game page; in the tests from the command line).
+func _match_config() -> Dictionary:
+	var c: Dictionary = menu.cfg
+	if autotest:
+		return {
+			"side": "cop" if cop_mode else "racer",
+			"elim_last": int(tune.get("elim_last", 0)) == 1, "elim_busted": int(tune.get("elim_busted", 0)) == 1,
+			"ending": String(tune.get("ending", "survival")), "scaled": String(tune.get("scale", "scaled")) == "scaled",
+			"share": String(tune.get("share", "own")),
+		}
+	return {
+		"side": "cop" if cop_mode else "racer",
+		"elim_last": bool(c["elim_last"]), "elim_busted": bool(c["elim_busted"]),
+		"ending": String(c["ending"]), "scaled": String(c["cop_scale"]) == "scaled", "share": String(c["cop_share"]),
+	}
+
+
+## Every racer of the match for rules.gd, in grid order.
+func _racer_specs() -> Array:
+	var specs: Array = []
+	for r in all_racers:
+		specs.append({"name": r.driver_name, "human": r == player})
+	return specs
+
+
+## The cops that score points this level (cop side): you and the AI backup cops.
+func _scoring_cops() -> Array:
+	var names: Array = []
+	if cop_mode:
+		names.append("YOU")
+		for k in range(int(COP_LEGS[leg][1])):
+			names.append("COP %d" % (k + 1))
+	return names
+
+
+## One line about this level's rules (story mode), shown during the countdown.
+func _story_line() -> String:
+	if not story:
+		return ""
+	var need: int = int(RulesScript.STORY_MAX_PLACE[leg])
+	if need >= 4:
+		return "Level %d: just survive. Do not get busted!" % (leg + 1)
+	if need == 1:
+		return "Level %d: win it to escape!" % (leg + 1)
+	return "Level %d: finish in the top %d." % [leg + 1, need]
+
+
+## The main menu: shown after the first warm-up and when a match is left. Nothing runs behind it.
+func _enter_title() -> void:
+	state = State.TITLE
+	hud.visible = false
+	fx.fade = 0.0
+	results_view.hide_screen()
+	menu.open_title()
+
+
+## Back to the main menu (from the pause menu or after a match): a fresh field in your saved car as the backdrop.
+func _to_title() -> void:
+	rules.reset()
+	story = false
+	cop_mode = String(menu.cfg["role"]) == "cop"
+	title_next = true
+	results_view.hide_screen()
+	_apply_role_ui()
+	_spawn_field()
+	_set_laps()
+	_assign_slots()
 	_start_leg()
 
 
@@ -733,7 +1126,10 @@ func _state_countdown(delta: float) -> void:
 			last_beep = n
 			_play("beep")
 		lbl_msg.text = str(n)
-		lbl_sub.text = "LEG %d/%d  %s  (%s)   %d laps, %d cops" % [leg + 1, LEGS.size(), track.map["name"], track.map["time"], laps, cops.size()]
+		if cop_mode:
+			lbl_sub.text = "LEVEL %d/%d  %s  (%s)   %d laps, %d racers: bust at least %d" % [leg + 1, LEGS.size(), track.map["name"], track.map["time"], laps, racers.size(), rules.cop_required()]
+		else:
+			lbl_sub.text = "LEVEL %d/%d  %s  (%s)   %d laps, %d racers, %d cops" % [leg + 1, LEGS.size(), track.map["name"], track.map["time"], laps, racers.size(), cops.size()]
 	else:
 		_play("beep_go")
 		state = State.RACING
@@ -745,7 +1141,7 @@ func _state_countdown(delta: float) -> void:
 		for r in racers:
 			r.controls_enabled = true
 		for c in cops:
-			c.controls_enabled = false  # released after the leg's cop delay
+			c.controls_enabled = (c == player)  # AI cops are released after the leg's cop delay; your police car (cop mode) goes now
 
 
 ## 5) the race
@@ -760,6 +1156,7 @@ func _state_racing(delta: float) -> void:
 	_update_arrests(delta)
 	_update_obstacles(delta)
 	_update_finishes()
+	_check_level_end(delta)
 	if player.on_dirt and warn_t <= 0.0:
 		_warn("SHORTCUT  -  loose dirt", 0.5)
 	_update_tips(delta)
@@ -782,6 +1179,11 @@ func _update_tips(delta: float) -> void:
 		_tip("go", "Hold W (or the UP arrow) to drive!")
 	elif stuck_t > 4.0 and race_time > 8.0:
 		_tip("stuck", "Stuck? Press R to put your car back on the road.")
+	elif cop_mode:
+		if player.nitro < 0.05:
+			_tip("nitro_out", "Out of nitro. Drift (hold SPACE while turning) to refill it fast.")
+		elif not used_nitro and race_time > 12.0 and player.nitro > 0.95:
+			_tip("nitro", "Your nitro is full (blue bar). Press SHIFT to catch up with the racers!")
 	elif player.arrest > 25.0 and nearest_cop < 14.0:
 		_tip("arrest", "A cop is right on you! Get away (SHIFT for nitro) before the red bar fills.")
 	elif player.spiked_t > 0.0:
@@ -832,6 +1234,8 @@ func _update_cop_targets(delta: float) -> void:
 		return
 	target_t = 0.4
 	for c in cops:
+		if c == player and not c.auto_drive:
+			continue   # you choose your own target
 		var best = null
 		var best_score: float = INF
 		for r in racers:
@@ -844,7 +1248,8 @@ func _update_cop_targets(delta: float) -> void:
 				best_score = sc
 				best = r
 		c.target_car = best
-		c.controls_enabled = best != null and race_time > LEGS[leg][4]
+		if c != player:
+			c.controls_enabled = best != null and race_time > LEGS[leg][4]
 	var near_cop = null
 	for c in cops:
 		c.siren_on = false
@@ -862,45 +1267,196 @@ func _update_arrests(delta: float) -> void:
 		if r.busted or r.finished:
 			continue
 		var rate: float = 0.0
+		var capt: Array = []   # the cops within reach: they all share this arrest
 		for c in cops:
 			var d: float = c.global_position.distance_to(r.global_position)
 			if r == player:
 				nearest_cop = minf(nearest_cop, d)
-			rate += clampf((12.0 - d) / 12.0, 0.0, 1.0) * LEGS[leg][6]
+			rate += clampf((12.0 - d) / 12.0, 0.0, 1.0) * LEGS[leg][6]   # every cop, the AI ones too, fills the bar equally fast
+			if d < 12.0:
+				capt.append(c.driver_name)
 		if rate > 0.0:
 			r.arrest += rate * delta
 		else:
 			r.arrest -= 12.0 * delta
 		r.arrest = clampf(r.arrest, 0.0, 100.0)
 		if r.arrest >= 100.0 and not no_arrest:
-			_bust(r)
+			_bust(r, capt)
 
 
-func _bust(r) -> void:
+## A racer's arrest bar is full. `capturers` = the cops that were within reach (they share the bust in cop mode).
+func _bust(r, capturers: Array) -> void:
 	r.busted = true
 	r.controls_enabled = false
 	r.set_ghost(true)
+	var pts: Dictionary = {}
+	if rules.active:
+		pts = rules.record_bust(r.driver_name, capturers)
+	if cop_mode:   # you or a backup cop busted a racer
+		_play("beep_go")
+		var msg: String = "%s BUSTED!   %d / %d" % [r.driver_name, _count_busted(), racers.size()]
+		if pts.has("YOU"):
+			msg += "   +%s pts" % RulesScript.fmt(float(pts["YOU"]))
+		_warn(msg, 2.5)
+		return
 	if r == player:
-		var order: Array = _standings()
 		_play("busted")
-		_end_race(State.BUSTED, order.find(player) + 1)
+		if story:   # story: the level is lost, retry it
+			_end_race(State.BUSTED, 0)
+		else:       # points race: 0 points for this level, the race goes on without you
+			_warn("BUSTED!  0 points this level", 4.0)
+			lbl_tip.text = "ENTER  =  skip ahead to the results"
+			tip_t = 999.0
+	elif not story:
+		_warn("%s BUSTED" % r.driver_name, 2.0)
 
 
 func _update_finishes() -> void:
 	for r in racers:
 		if r.finished or r.busted:
 			continue
-		if r.prog >= total_progress:
-			r.finished = true
-			finish_order.append(r)
+		if r.prog < total_progress:
+			continue
+		r.finished = true
+		finish_order.append(r)
+		if cop_mode:
+			_racer_leaves(r, "%s GOT AWAY!" % r.driver_name)
+		elif story:
 			if r == player:
-				_play("escaped")
-				if leg < LEGS.size() - 1:
-					_end_race(State.LEG_CLEAR, finish_order.size())
-				else:
-					_end_race(State.ESCAPED, finish_order.size())
+				_story_finish(finish_order.size())
+		elif r == player:
+			_player_finished(finish_order.size())
+		else:
+			_racer_leaves(r, "%s FINISHED %s" % [r.driver_name, RulesScript.ordinal(finish_order.size())])
 
 
+## Story: you crossed the line. Good enough for this level's place? Then on to the next level, else retry.
+func _story_finish(place: int) -> void:
+	var lenient: bool = autotest and int(tune.get("strict", 0)) != 1   # the dev tests clear every level like before
+	if lenient or RulesScript.story_ok(leg, place):
+		_play("escaped")
+		_end_race(State.LEG_CLEAR if leg < LEGS.size() - 1 else State.ESCAPED, place)
+	else:
+		_play("busted")
+		_end_race(State.BUSTED, place)
+
+
+## Points race: you crossed the line. The others still have to finish (or ENTER skips ahead).
+func _player_finished(place: int) -> void:
+	_play("escaped")
+	_warn("YOU FINISHED %s" % RulesScript.ordinal(place), 4.0)
+	player.controls_enabled = false
+	player.set_ghost(true)
+	player.gone = true   # the other drivers ignore your parked car
+	lbl_tip.text = "Waiting for the others...   ENTER  =  skip ahead"
+	tip_t = 999.0
+
+
+## A racer crossed the line (it got away, or finished its race): its car drives off (hidden, no collisions) and
+## nobody chases it any more.
+func _racer_leaves(r, msg: String) -> void:
+	r.gone = true
+	r.controls_enabled = false
+	r.engine_force = 0.0
+	r.brake = CarScript.BRAKE_FORCE
+	r.set_ghost(true)
+	r.set_sounds(false)
+	r.visible = false
+	r.process_mode = Node.PROCESS_MODE_DISABLED
+	_warn(msg, 2.5)
+
+
+## Points modes: is the level over? Racer side: when everybody has finished or been busted, or WAIT_AFTER_YOU seconds
+## after your own race ended (ENTER skips). Cop side: when every racer is busted or got away; the level is failed as
+## soon as the quota of busts is out of reach. Story ends in _update_finishes / _bust instead.
+func _check_level_end(delta: float) -> void:
+	if story or not rules.active or state != State.RACING:
+		return
+	var unresolved: int = 0
+	for r in racers:
+		if not r.busted and not r.finished:
+			unresolved += 1
+	if cop_mode:
+		if race_time > COP_LEVEL_CAP and unresolved > 0:   # a racer is stuck somewhere: it got away
+			for r in racers:
+				if not r.busted and not r.finished:
+					r.finished = true
+					finish_order.append(r)
+					_racer_leaves(r, "%s GOT AWAY!" % r.driver_name)
+			unresolved = 0
+		if not rules.cop_can_pass(_count_away()):
+			_play("busted")
+			_end_race(State.BUSTED, 0)
+		elif unresolved == 0:
+			_finish_points_level()
+		return
+	var mine_over: bool = player.busted or player.finished
+	if mine_over:
+		wait_t += delta
+	var skip: bool = wait_t > 1.0 and (Input.is_physical_key_pressed(KEY_ENTER) or Input.is_physical_key_pressed(KEY_KP_ENTER))
+	if unresolved == 0 or (mine_over and (wait_t > WAIT_AFTER_YOU or skip)):
+		_finish_points_level()
+
+
+## Points modes: hand out the points, eliminate, and show the results of the level.
+func _finish_points_level() -> void:
+	state = State.RESULTS
+	timer = 0.0
+	for r in racers:
+		r.controls_enabled = false
+	for c in cops:
+		c.controls_enabled = false
+	var fin: Array = []
+	for r in finish_order:
+		fin.append(r.driver_name)
+	var running: Array = []
+	for r in _standings():
+		if not r.finished and not r.busted:
+			running.append(r.driver_name)
+	var res: Dictionary = rules.finish_level(fin, running)
+	var scr: Dictionary = rules.level_screen(res)
+	var title: String = "LEVEL %d / %d  -  %s" % [leg + 1, LEGS.size(), track.map["name"]]
+	var foot: String = "ENTER  =  final standings"
+	if not rules.over:
+		foot = "ENTER  =  next level:  %s" % TrackScript.MAPS[leg + 1]["name"]
+	hud.visible = false
+	results_view.show_screen(title, scr["sub"], "", scr["tables"], foot)
+	_play("escaped")
+
+
+func _state_results(delta: float) -> void:
+	timer += delta
+	if autotest and timer > 1.0:
+		_results_continue()
+	elif timer > 0.7 and (Input.is_physical_key_pressed(KEY_ENTER) or Input.is_physical_key_pressed(KEY_KP_ENTER)):
+		_results_continue()
+
+
+func _results_continue() -> void:
+	if rules.over:
+		_show_final()
+	else:
+		results_view.hide_screen()
+		_goto_leg(leg + 1, false)
+
+
+func _show_final() -> void:
+	state = State.FINAL
+	timer = 0.0
+	var scr: Dictionary = rules.final_screen()
+	results_view.show_screen(scr["title"], scr["line1"], scr["line2"], scr["tables"], "ENTER  =  main menu")
+
+
+func _state_final(delta: float) -> void:
+	timer += delta
+	if autotest:
+		return   # _autotest_log prints the result and quits
+	if timer > 0.7 and (Input.is_physical_key_pressed(KEY_ENTER) or Input.is_physical_key_pressed(KEY_KP_ENTER)):
+		_to_title()
+
+
+## Story (and a failed cop level): the level is over. BUSTED = failed, ENTER retries. LEG_CLEAR = on to the next level
+## by itself. ESCAPED = the story is won, ENTER goes back to the main menu.
 func _end_race(result: int, place: int) -> void:
 	state = result
 	timer = 0.0
@@ -908,21 +1464,38 @@ func _end_race(result: int, place: int) -> void:
 		r.controls_enabled = false
 	for c in cops:
 		c.controls_enabled = false
-	var ordinal: String = ["", "1st", "2nd", "3rd", "4th", "5th"][clampi(place, 0, 5)]
+	if cop_mode:
+		_cop_fail_text()
+		return
+	var ordinal: String = RulesScript.ordinal(place)
 	if result == State.BUSTED:
-		lbl_msg.text = "BUSTED!"
 		lbl_msg.add_theme_color_override("font_color", Color(1, 0.3, 0.3))
-		lbl_sub.text = "The cops got you on leg %d.   Press ENTER to retry the leg." % (leg + 1)
-		lbl_tip.text = "TIP: when the red ARREST bar starts filling, use nitro (SHIFT) to get away from the cop."
+		if player.busted:
+			lbl_msg.text = "BUSTED!"
+			lbl_sub.text = "The cops got you on level %d.   Press ENTER to retry the level." % (leg + 1)
+			lbl_tip.text = "TIP: when the red ARREST bar starts filling, use nitro (SHIFT) to get away from the cop."
+		else:
+			lbl_msg.text = "TOO SLOW!"
+			lbl_sub.text = "You finished %s but needed the top %d.   Press ENTER to retry the level." % [ordinal, int(RulesScript.STORY_MAX_PLACE[leg])]
+			lbl_tip.text = "TIP: use nitro (SHIFT) on the straights, and drift (SPACE while turning) to refill it."
 		tip_t = 999.0
 	elif result == State.LEG_CLEAR:
-		lbl_msg.text = "LEG %d CLEAR" % (leg + 1)
+		lbl_msg.text = "LEVEL %d CLEAR" % (leg + 1)
 		lbl_msg.add_theme_color_override("font_color", Color(0.5, 1, 0.5))
 		lbl_sub.text = "%s in %s.   Next: %s (%s)" % [ordinal, _time_str(race_time), TrackScript.MAPS[leg + 1]["name"], TrackScript.MAPS[leg + 1]["time"]]
 	else:
 		lbl_msg.text = "YOU ESCAPED!"
 		lbl_msg.add_theme_color_override("font_color", Color(0.5, 1, 0.5))
-		lbl_sub.text = "Out of the city, %s on the last leg. Total %s.   Press ENTER for a new run." % [ordinal, _time_str(run_time)]
+		lbl_sub.text = "Out of the city, %s on the last level. Total %s.   Press ENTER for the main menu." % [ordinal, _time_str(run_time)]
+
+
+## Cop side: too many racers got away to make the quota of busts. ENTER retries the level.
+func _cop_fail_text() -> void:
+	lbl_msg.text = "THEY GOT AWAY!"
+	lbl_msg.add_theme_color_override("font_color", Color(1, 0.3, 0.3))
+	lbl_sub.text = "The cops needed %d busts: %d racers got away, %d busted.   Press ENTER to retry the level." % [rules.cop_required(), _count_away(), _count_busted()]
+	lbl_tip.text = "TIP: stay within 12 m of a racer until its ARREST bar is full. Use nitro (SHIFT) to catch up."
+	tip_t = 999.0
 
 
 func _state_over(_delta: float) -> void:
@@ -977,7 +1550,8 @@ func _update_obstacles(delta: float) -> void:
 				c.dodge = -signf(o["lat"]) * track.width * 0.27
 			if c == player and not o["warned"] and ahead > 0.0 and ahead < 200.0:
 				o["warned"] = true
-				_warn("SPIKE STRIP AHEAD" if o["kind"] == Obs.SPIKES else "ROADBLOCK AHEAD")
+				var spikes_text: String = "SPIKE STRIP AHEAD  (cops are immune)" if cop_mode else "SPIKE STRIP AHEAD"
+				_warn(spikes_text if o["kind"] == Obs.SPIKES else "ROADBLOCK AHEAD")
 			if o["kind"] == Obs.SPIKES and not c.is_cop and not o["hit"].has(c) and absf(ahead) < 2.0:
 				var i: int = posmod(int(o["prog"]), track.count)
 				var lat: float = (c.global_position - track.points[i]).dot(track.right_at(i))
@@ -1045,7 +1619,7 @@ func _begin_loading() -> void:
 	for n in sfx:
 		sfx[n].play()   # registers each sound with the web audio backend now, muted
 	player.snd_crash.play()
-	load_lbl.text = "LOADING  LEG %d: %s" % [leg + 1, track.map["name"]]
+	load_lbl.text = "LOADING  LEVEL %d: %s" % [leg + 1, track.map["name"]]
 	load_layer.visible = true
 
 
@@ -1128,8 +1702,7 @@ func _state_loading() -> void:
 		load_bar.value = 0.0
 		if autotest:
 			print("[loading] %d stops, done at t=%.2f" % [load_steps.size(), sim_time])
-		state = State.COUNTDOWN
-		_begin_countdown()
+		_after_load()
 		return
 	cam.global_transform = load_steps[load_i][0]
 	warm_rig.global_position = load_steps[load_i][1]
@@ -1365,9 +1938,11 @@ func _autotest_log(delta: float) -> void:
 		return
 	if state == State.LEG_CLEAR and timer == 0.0:
 		print("[leg %d clear] race_time=%.1f obstacles=%d shortcuts=%d" % [leg + 1, race_time, obstacles.size(), track.shortcuts.size()])
-	if state == State.BUSTED or state == State.ESCAPED or sim_time > 900.0:
+	if state == State.BUSTED or state == State.ESCAPED or state == State.FINAL or sim_time > 900.0:
 		var res: String = "[autotest] result state=%d leg=%d race_time=%.1f run_time=%.1f order:" % [state, leg + 1, race_time, run_time]
 		for r in _standings():
 			res += " " + r.driver_name + ("(B)" if r.busted else "")
 		print(res)
+		if rules.active:
+			print("[autotest] points ranking: ", rules.points_ranking(), "  cops by points: ", rules.cop_board_points())
 		get_tree().quit()

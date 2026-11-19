@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.4.2
+- "Match ends" is now **survival** / **last one standing**. Survival is what v0.4.1 called "all levels": the match always goes on
+  to the last level, even if you are the only racer left (then it is you against the cops). The choice only shows up when an
+  elimination modifier is on, because without eliminations nobody is ever left alone.
+
+## v0.4.1
+- The AI backup cops now fill a racer's arrest bar exactly as fast as you do (it was half speed).
+- "Survival" is gone from "Match ends": it was practically the same as playing all the levels. The choice is now all levels /
+  last one standing. (The lone survivor of the last level still goes out if the cops catch them.)
+
+## v0.4
+- Main menu before the race (Play, Garage, How to play, Settings, Quit) and a New Game page: pick the side (RACER / COP), the
+  game mode (POINTS RACE / STORY) and the modifiers, open the Garage, START. Your choices are remembered. The pause menu
+  got Retry level, Restart match and Main menu. The Garage no longer switches side (that is the New Game page now).
+- Points race (racer): 1st 10, 2nd 7, 3rd 4, 4th 2, busted 0 points per level; results screen after each level; the other
+  racers get to finish after you (or ENTER skips). Final standings with two rankings (points, elimination).
+- Modifiers: last place is eliminated, busted racers are eliminated, match ends = all levels / last one standing.
+- Story (racer): level 1 survive, level 2 top 3, level 3 top 2, level 4 win. No points. (Busted AI racers now come back every
+  level instead of sitting the run out, and arrest bars no longer carry over: each level starts clean.)
+- Cop side: bust quota per level (1, 2, 3, all 4; 1 with an elimination modifier), points per bust with strikes (same cop busting
+  in a row: 1/2/3/4, scaled by how many racers are left or flat), shared bust rules (own step / highest step / split), the AI backup
+  cops compete with you, leaderboards for eliminations and for points. Cop levels have 3 laps.
+- rules.gd holds all of that (no nodes, tested against the examples in the design notes); results_view.gd draws the screens.
+- "Leg" is now called "level" everywhere. The HUD shows your points / the bust quota.
+
+## v0.3
+- Garage (key G, "Garage" in the pause menu, and it opens by itself on first launch): a turntable preview of your car,
+  a colour wheel (plus quick swatches and a hex field) to paint the getaway car any colour you like, and a ROBBER / COP
+  switch. The colour and the role are saved in user://settings.cfg. The colour is applied live: the racing car's red
+  paint is swapped for it (car_model.gd `set_paint_color`), so you no longer start as yellow every time.
+- Cop mode: drive the police cruiser (siren, nitro, drift, F = siren sound on/off) and bust the four AI racers.
+  A racer's ARREST bar fills while you are within ~12 m (backup cops count half). Name tags over the racers, a nearest-racer
+  readout and a green arrest bar show who you are catching. Racers that finish their laps got away; more escapes than the
+  leg allows (2 on legs 1-2, 1 on legs 3-4) loses the leg. Three laps per leg, racers get faster each leg, 1-2 backup cops.
+  Dispatch still drops spike strips / roadblocks ahead of the racers.
+- Minimap: your own dot has a white ring; hidden cars are not drawn.
+- Main flow: the field is now built by `_spawn_field()` for either role (the start-up calibration car is replaced by it).
+
 ## v0.2.2
 - Performance: view distance cut from 900 m to each map's fog distance (340-450 m); scenery and road split into
   120 m chunks that can be skipped when off-screen or past the fog (was one track-wide mesh each, always drawn);

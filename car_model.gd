@@ -69,6 +69,7 @@ var _age: int = 0
 var _calm: int = 0
 var _tries: int = 0
 var _placed_c: float = -1.0
+var paint_mats: Array = []               # every repainted material [{mat, base: Color, tex: bool}]: lets the paint colour change live (garage)
 
 
 # ================================ building ================================
@@ -301,13 +302,29 @@ func _repainted(base: BaseMaterial3D, color: Color) -> Material:
 		sm.set_shader_parameter("paint_color", color)
 		sm.set_shader_parameter("metallic_amount", PAINT_METALLIC)
 		sm.set_shader_parameter("roughness_amount", PAINT_ROUGHNESS)
+		paint_mats.append({"mat": sm, "base": base.albedo_color, "tex": true})
 		return sm
 	var m: BaseMaterial3D = base.duplicate() as BaseMaterial3D
 	if m.albedo_texture == null:
 		m.albedo_color = Color(color.r, color.g, color.b, m.albedo_color.a)
 	else:
 		m.albedo_color = m.albedo_color * color     # textured: multiply, keeps the detail
+	paint_mats.append({"mat": m, "base": base.albedo_color, "tex": base.albedo_texture != null})
 	return m
+
+
+## Change the racer's paint colour on a car that already exists (the Garage preview and your own car use this).
+func set_paint_color(color: Color) -> void:
+	for rec in paint_mats:
+		var m: Material = rec["mat"]
+		if m is ShaderMaterial:
+			(m as ShaderMaterial).set_shader_parameter("paint_color", color)
+		elif m is BaseMaterial3D:
+			var b: Color = rec["base"]
+			if rec["tex"]:
+				(m as BaseMaterial3D).albedo_color = b * color
+			else:
+				(m as BaseMaterial3D).albedo_color = Color(color.r, color.g, color.b, b.a)
 
 
 static func _is_paint(m: BaseMaterial3D) -> bool:

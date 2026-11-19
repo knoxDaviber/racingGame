@@ -80,6 +80,7 @@ var model = null                # CarModel when a real 3D model is in use, null 
 var siren_t: float = 0.0
 var siren_lights: Array = []
 var siren_mats: Array = []
+var body_mat: StandardMaterial3D = null   # the box car's paint (only used when there is no 3D model)
 
 var reset_cd: float = 0.0
 var prev_vel_ang: float = 0.0
@@ -110,6 +111,9 @@ var sc_plan: int = -1           # shortcut the AI has decided to take (-1 = none
 var sc_decided: int = -1
 var night: bool = false
 var siren_on: bool = false      # set by Main: the one audible siren (nearest cop)
+var siren_muted: bool = false   # the police car you drive: F turns its siren sound off (the lights keep flashing)
+var _siren_key_down: bool = false
+var gone: bool = false          # cop mode: a racer that got away. Hidden, no collisions, ignored by the other drivers
 var cam: Camera3D = null        # set by Main: used to cull sounds and lights far from the player
 
 var snd_engine: AudioStreamPlayer3D
@@ -255,7 +259,8 @@ func _build_visual() -> void:
 			visual.add_child(l)
 			siren_lights.append(l)
 	else:
-		_box(Vector3(1.8, 0.5, 4.2), Vector3(0, 0.1, 0), _paint(body_color, 0.6, 0.3))
+		body_mat = _paint(body_color, 0.6, 0.3)
+		_box(Vector3(1.8, 0.5, 4.2), Vector3(0, 0.1, 0), body_mat)
 		_box(Vector3(1.5, 0.45, 1.9), Vector3(0, 0.58, 0.4), glass)
 		_box(Vector3(1.6, 0.07, 0.5), Vector3(0, 0.7, 1.95), _paint(Color(0.08, 0.08, 0.1), 0.3, 0.5))
 		_box(Vector3(0.08, 0.3, 0.2), Vector3(-0.6, 0.52, 1.95), _paint(Color(0.08, 0.08, 0.1), 0.3, 0.5))
@@ -354,6 +359,17 @@ func set_night(on: bool) -> void:
 		headlight.visible = on
 
 
+## Repaint the car's body (the Garage uses this). Cops keep their police paint.
+func set_body_color(c: Color) -> void:
+	body_color = c
+	if is_cop:
+		return
+	if model != null:
+		model.set_paint_color(c)
+	elif body_mat != null:
+		body_mat.albedo_color = c
+
+
 func set_sounds(on: bool) -> void:
 	for p in [snd_engine, snd_skid, snd_nitro, snd_siren]:
 		if p == null:
@@ -391,7 +407,7 @@ func _update_audio(delta: float) -> void:
 	snd_skid.pitch_scale = 0.9 + speed / 160.0
 	snd_nitro.volume_db = VOL - 8.0 if boosting else -80.0
 	if snd_siren != null:   # only the cop Main picks as `siren_on` is heard: one siren, never a chorus
-		snd_siren.volume_db = VOL - 6.0 if controls_enabled and siren_on else -80.0
+		snd_siren.volume_db = VOL - 6.0 if controls_enabled and siren_on and not siren_muted else -80.0
 
 
 func _update_nitro(delta: float, fspeed: float) -> void:
@@ -712,6 +728,11 @@ func _read_player() -> void:
 	in_steer = (1.0 if left else 0.0) - (1.0 if right else 0.0)
 	in_handbrake = Input.is_physical_key_pressed(KEY_SPACE)
 	in_nitro = Input.is_physical_key_pressed(KEY_SHIFT)
+	if is_cop:   # F = siren sound on / off
+		var f_down: bool = Input.is_physical_key_pressed(KEY_F)
+		if f_down and not _siren_key_down:
+			siren_muted = not siren_muted
+		_siren_key_down = f_down
 	if Input.is_physical_key_pressed(KEY_R) and reset_cd <= 0.0:
 		respawn()
 		reset_cd = 1.5
@@ -816,7 +837,7 @@ func _drive_ai(delta: float, fspeed: float) -> void:
 		var f: Vector3 = forward_world()
 		var l: Vector3 = Vector3.UP.cross(f)
 		for o in get_tree().get_nodes_in_group("cars"):
-			if o == self or o.is_cop or o.busted:
+			if o == self or o.is_cop or o.busted or o.gone:
 				continue
 			var rel: Vector3 = o.global_position - pos
 			var ahead: float = rel.dot(f)
