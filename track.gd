@@ -44,6 +44,13 @@ const MAPS: Array = [
 	"sky_top": Color(0.01, 0.01, 0.04), "sky_hor": Color(0.12, 0.08, 0.2), "sun_rot": Vector3(-50, 120, 0),
 	"sun_col": Color(0.55, 0.65, 1.0), "sun_e": 0.18, "ambient": 0.35, "fog_col": Color(0.1, 0.07, 0.16), "fog_begin": 110.0,
 	"lamp": 3.5, "night": true},
+	{"name": "HIGHLAND LOOP", "shortcuts": 0, "time": "Dawn", "width": 18.0, "verge_w": 9.0, "scenery": "pines", "lamps": 0,
+	"cuts": [{"a": 4, "b": 17}, {"a": 33, "b": 48, "jump": true}],   # the square's dirt cut, and the ramp jump over the lobe
+	"ctrl": [Vector2(-37.5, -150.0), Vector2(-57.9, -145.4), Vector2(-78.2, -140.9), Vector2(-94.3, -128.1), Vector2(-111.7, -116.7), Vector2(-129.9, -106.6), Vector2(-148.2, -96.5), Vector2(-166.4, -86.4), Vector2(-184.6, -76.1), Vector2(-202.7, -65.8), Vector2(-220.5, -54.9), Vector2(-228.5, -36.3), Vector2(-222.2, -16.6), Vector2(-213.9, 2.6), Vector2(-205.4, 21.7), Vector2(-196.7, 40.6), Vector2(-187.9, 59.5), Vector2(-179.4, 78.6), Vector2(-171.4, 97.8), Vector2(-163.3, 117.1), Vector2(-152.5, 134.6), Vector2(-138.5, 150.0), Vector2(-124.4, 165.4), Vector2(-107.1, 176.5), Vector2(-88.3, 185.6), Vector2(-69.4, 194.4), Vector2(-50.2, 202.5), Vector2(-30.1, 206.1), Vector2(-9.2, 205.8), Vector2(11.5, 204.5), Vector2(31.7, 199.3), Vector2(51.9, 194.1), Vector2(71.4, 186.8), Vector2(90.3, 178.0), Vector2(107.9, 181.0), Vector2(124.2, 194.0), Vector2(141.1, 205.6), Vector2(161.9, 206.2), Vector2(182.8, 206.9), Vector2(201.8, 199.4), Vector2(220.2, 189.7), Vector2(238.6, 179.9), Vector2(249.8, 162.3), Vector2(253.3, 142.5), Vector2(239.3, 127.8), Vector2(221.7, 116.6), Vector2(204.0, 105.6), Vector2(186.7, 94.0), Vector2(183.6, 74.5), Vector2(195.5, 57.4), Vector2(198.0, 37.3), Vector2(198.0, 16.5), Vector2(197.9, -4.4), Vector2(197.2, -25.2), Vector2(196.6, -46.1), Vector2(213.5, -56.3), Vector2(232.3, -65.5), Vector2(247.3, -79.0), Vector2(242.8, -98.3), Vector2(224.1, -107.2), Vector2(206.2, -117.4), Vector2(201.9, -137.0), Vector2(211.4, -155.5), Vector2(208.7, -175.0), Vector2(189.6, -180.6), Vector2(168.9, -177.8), Vector2(148.3, -174.9), Vector2(127.6, -172.0), Vector2(107.1, -168.5), Vector2(86.6, -164.6), Vector2(66.1, -160.7), Vector2(45.6, -156.7), Vector2(25.0, -153.5), Vector2(4.2, -152.5), Vector2(-16.7, -151.2)],
+	"ground": Color(0.2, 0.3, 0.17), "road": Color(0.2, 0.2, 0.22), "walls": [Color(0.9, 0.9, 0.9), Color(0.25, 0.3, 0.4)],
+	"sky_top": Color(0.25, 0.35, 0.6), "sky_hor": Color(0.98, 0.78, 0.6), "sun_rot": Vector3(-12, 60, 0),
+	"sun_col": Color(1.0, 0.8, 0.6), "sun_e": 1.0, "ambient": 0.75, "fog_col": Color(0.85, 0.72, 0.62), "fog_begin": 200.0,
+	"lamp": 0.4, "night": false},
 ]
 
 var map: Dictionary = MAPS[0]   # set by Main before build()
@@ -55,11 +62,22 @@ var a_lat: float = 12.0  # lateral acceleration (m/s^2) the AI assumes it can co
 const SC_WIDTH: float = 11.0     # shortcuts: narrow,
 const SC_GRIP: float = 0.8       # loose dirt,
 const SC_SPEED: float = 21.0     # and the AI takes them slowly
+const VERGE_GRIP: float = 0.7    # the dirt between the road and the railing
+const JUMP_APPROACH: float = 22.0   # the ramp jump: dirt run-up, ramp, pit, landing, exit
+const JUMP_RAMP_LEN: float = 16.0
+const JUMP_RAMP_H: float = 1.7
+const JUMP_GAP: float = 34.0
+const JUMP_LAND_LEN: float = 18.0
+const JUMP_LAND_H: float = 1.2
+const JUMP_HALF_W: float = 4.6   # inside the dirt cut's side walls (they stand at 5.5 m from the centre)
 
 var points: PackedVector3Array = PackedVector3Array()
 ## Shortcuts: [{a, b, pts: PackedVector3Array}]. A dirt cut from main sample a to b (b > a, no wrap).
 var shortcuts: Array = []
 var last_on_shortcut: bool = false   # set by locate(): did the last lookup land on a shortcut?
+var last_off_road: bool = false      # set by locate(): beside the road (in the verge) rather than on it
+var verge: float = 12.0              # width of the open dirt/trees strip between the road and the railing
+var jumps: Array = []                # pits under the ramp jumps (a car that falls in is put back on the road)
 var tangents: PackedVector3Array = PackedVector3Array()
 var corner_speed: PackedFloat32Array = PackedFloat32Array()  # max sensible speed at each sample
 var length: float = 0.0
@@ -77,11 +95,17 @@ func view_dist() -> float:
 
 func build() -> void:
 	width = float(map["width"])
+	verge = float(map.get("verge_w", 12.0))
 	_make_centerline()
-	_find_shortcuts(int(map.get("shortcuts", 0)))
+	if map.has("cuts"):
+		_authored_cuts()
+	else:
+		_find_shortcuts(int(map.get("shortcuts", 0)))
 	_make_ground()
 	_make_road()
 	_make_walls()
+	_make_verge()
+	_make_verge_props()
 	_make_start_gantry()
 	_make_scenery()
 
@@ -150,11 +174,9 @@ func nearest_index(pos: Vector3, hint: int, window: int) -> int:
 func locate(pos: Vector3, hint: int) -> int:
 	last_on_shortcut = false
 	var i: int = nearest_index(pos, hint, 20)
-	if shortcuts.is_empty():
-		return i
-	var lim: float = width * 0.5 + 2.0
-	if Vector2(points[i].x - pos.x, points[i].z - pos.z).length_squared() < lim * lim:
-		return i
+	last_off_road = absf((pos - points[i]).dot(right_at(i))) > width * 0.5 + 0.4
+	if shortcuts.is_empty() or not last_off_road:
+		return i   # on the road itself
 	for sc in shortcuts:
 		var p: PackedVector3Array = sc["pts"]
 		var bk: int = -1
@@ -166,6 +188,7 @@ func locate(pos: Vector3, hint: int) -> int:
 				bk = k
 		if bd < pow(SC_WIDTH * 0.5 + 3.0, 2.0):
 			last_on_shortcut = true
+			last_off_road = false
 			return int(lerpf(float(sc["a"]), float(sc["b"]), float(bk) / float(p.size() - 1)))
 	return i
 
@@ -218,7 +241,7 @@ func _find_shortcuts(want: int) -> void:
 func _chord_clear(a: int, b: int) -> bool:
 	var pa: Vector3 = points[a]
 	var pb: Vector3 = points[b]
-	var need: float = width + SC_WIDTH + 6.0
+	var need: float = width + SC_WIDTH + 6.0 + verge
 	for i in range(count):
 		if absi(i - a) < 10 or absi(i - b) < 10 or absi(i - a + count) < 10 or absi(i - b - count) < 10:
 			continue
@@ -244,6 +267,21 @@ func _near_shortcut(a: Vector3, b: Vector3, r: float) -> bool:
 	for sc in shortcuts:
 		for p in sc["pts"]:
 			if Geometry3D.get_closest_point_to_segment(p, a, b).distance_to(p) < r:
+				return true
+	return false
+
+
+## True when `pos` is within `r` metres of any dirt cut's centre line (measured to the whole polyline, not just its sample
+## points), so scenery and lamp posts never stand on or beside a cut.
+func _on_cut(pos: Vector3, r: float) -> bool:
+	var q := Vector2(pos.x, pos.z)
+	for sc in shortcuts:
+		var pts: PackedVector3Array = sc["pts"]
+		for k in range(pts.size() - 1):
+			var a := Vector2(pts[k].x, pts[k].z)
+			var b := Vector2(pts[k + 1].x, pts[k + 1].z)
+			var c: Vector2 = Geometry2D.get_closest_point_to_segment(q, a, b)
+			if c.distance_to(q) < r:
 				return true
 	return false
 
@@ -359,7 +397,7 @@ func _make_walls() -> void:
 	var body := StaticBody3D.new()
 	body.name = "Walls"
 	add_child(body)
-	var half: float = width * 0.5
+	var half: float = width * 0.5 + verge   # the railing stands at the edge of the open verge
 	var vis: Array = [[], []]   # visuals batched per colour into 2 MultiMeshes (was ~340 nodes)
 	for side in [-1.0, 1.0]:
 		for i in range(count):
@@ -402,7 +440,13 @@ func _make_shortcuts(body: StaticBody3D, vis: Array) -> void:
 	var half: float = SC_WIDTH * 0.5
 	for sc in shortcuts:
 		var p: PackedVector3Array = sc["pts"]
+		if sc.get("jump", false):
+			_make_jump(sc, body)
 		for k in range(p.size() - 1):
+			if sc.get("jump", false):
+				var sd: float = p[0].distance_to(p[k])
+				if sd > float(sc["skip0"]) and sd < float(sc["skip1"]):
+					continue   # ramp, pit and landing replace the dirt here
 			var d: Vector3 = (p[k + 1] - p[k]).normalized()
 			var r: Vector3 = d.cross(Vector3.UP)
 			var y := Vector3(0, 0.035, 0)  # just under the main road, so it never z-fights at the mouths
@@ -415,7 +459,7 @@ func _make_shortcuts(body: StaticBody3D, vis: Array) -> void:
 				st.add_vertex(v)
 			for side in [-1.0, 1.0]:
 				var c: Vector3 = (p[k] + p[k + 1]) * 0.5 + r * ((half + wall_thickness * 0.5) * side) + Vector3(0, wall_height * 0.5, 0)
-				if _dist_to_main(c) < width * 0.5 + wall_thickness + 7.0:  # leave the fork wide open (no spear-tip wall in the lane)
+				if _dist_to_main(c) < width * 0.5 + verge + wall_thickness + 7.0:  # leave the fork wide open (no spear-tip wall in the lane)
 					continue
 				var xf := Transform3D(Basis.looking_at(d, Vector3.UP), c)
 				var size := Vector3(wall_thickness, wall_height, p[k].distance_to(p[k + 1]) * 1.3 + 0.4)
@@ -425,6 +469,7 @@ func _make_shortcuts(body: StaticBody3D, vis: Array) -> void:
 	mi.mesh = st.commit()
 	mi.material_override = _mat(Color(0.55, 0.42, 0.26), 1.0)
 	add_child(mi)
+	_make_boulders(body)
 	# entry chevrons: bright arrows at each mouth so you can read the risk early
 	var arrows: Array = []
 	for sc in shortcuts:
@@ -436,6 +481,218 @@ func _make_shortcuts(body: StaticBody3D, vis: Array) -> void:
 	am.emission = Color(1.0, 0.6, 0.05)
 	am.emission_energy_multiplier = 1.5
 	_add_multimesh_xf(_box_mesh(Vector3.ONE), am, arrows)
+
+
+## Cuts written into the map (instead of found automatically): [{a, b, jump?}] with a and b = control point numbers.
+func _authored_cuts() -> void:
+	for c in map["cuts"]:
+		var a: int = int(c["a"]) * SUBDIV
+		var b: int = int(c["b"]) * SUBDIV
+		var sc: Dictionary = {"a": a, "b": b, "pts": _shortcut_curve(a, b)}
+		if c.get("jump", false):
+			sc["jump"] = true
+		shortcuts.append(sc)
+
+
+## The ramp jump: a run-up of dirt, a ramp, a pit you must fly over, a landing ramp, then dirt again.
+## Too slow = you fall in the pit (back on the road, time lost) or hit the landing wall.
+func _make_jump(sc: Dictionary, body: StaticBody3D) -> void:
+	var pts: PackedVector3Array = sc["pts"]
+	var o: Vector3 = pts[0]
+	var d: Vector3 = pts[pts.size() - 1] - o
+	d.y = 0.0
+	d = d.normalized()
+	var basis := Basis.looking_at(d, Vector3.UP)   # local -Z runs along the cut
+	var s_gap0: float = JUMP_APPROACH + JUMP_RAMP_LEN
+	var s_land: float = s_gap0 + JUMP_GAP
+	_add_wedge(body, Transform3D(basis, o + d * JUMP_APPROACH), JUMP_HALF_W, JUMP_RAMP_LEN, JUMP_RAMP_H, true)
+	_add_wedge(body, Transform3D(basis, o + d * s_land), JUMP_HALF_W + 0.5, JUMP_LAND_LEN, JUMP_LAND_H, false)
+	sc["skip0"] = JUMP_APPROACH - 3.0
+	sc["skip1"] = s_land + JUMP_LAND_LEN + 3.0
+	jumps.append({"o": o, "d": d, "s0": s_gap0, "s1": s_land, "hw": JUMP_HALF_W + 0.5})
+	var pit := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3((JUMP_HALF_W + 0.5) * 2.0, 0.1, JUMP_GAP)
+	pit.mesh = bm
+	var pm := _mat(Color(0.12, 0.05, 0.04), 1.0)
+	pm.emission_enabled = true
+	pm.emission = Color(1.0, 0.3, 0.05)
+	pm.emission_energy_multiplier = 0.6
+	pit.material_override = pm
+	pit.transform = Transform3D(basis, o + d * (s_gap0 + JUMP_GAP * 0.5) + Vector3(0, 0.04, 0))
+	add_child(pit)
+
+
+## A curved ramp (trimesh collider; the car's chassis scrapes a straight wedge's sharp start). Rising: the profile
+## eases up from the ground to `h` at the far end, where it stops in a vertical face. Not rising: the vertical face
+## comes first and the profile eases back down to the ground (the landing).
+func _add_wedge(body: StaticBody3D, xf: Transform3D, hw: float, length: float, h: float, rising: bool) -> void:
+	var n: int = 12
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var tops: Array = []
+	for k in range(n + 1):
+		var u: float = float(k) / float(n)
+		var f: float = h * pow(u, 1.8) if rising else h * pow(1.0 - u, 1.8)
+		tops.append(f)
+	for k in range(n):
+		var z0: float = -length * float(k) / float(n)
+		var z1: float = -length * float(k + 1) / float(n)
+		var y0: float = tops[k]
+		var y1: float = tops[k + 1]
+		# top surface
+		for v in [Vector3(-hw, y0, z0), Vector3(hw, y0, z0), Vector3(hw, y1, z1), Vector3(-hw, y0, z0), Vector3(hw, y1, z1), Vector3(-hw, y1, z1)]:
+			st.add_vertex(v)
+		# both sides
+		for sx in [-hw, hw]:
+			for v in [Vector3(sx, 0, z0), Vector3(sx, y0, z0), Vector3(sx, y1, z1), Vector3(sx, 0, z0), Vector3(sx, y1, z1), Vector3(sx, 0, z1)]:
+				st.add_vertex(v)
+	var zf: float = -length if rising else 0.0   # the vertical face
+	var hf: float = h
+	for v in [Vector3(-hw, 0, zf), Vector3(hw, 0, zf), Vector3(hw, hf, zf), Vector3(-hw, 0, zf), Vector3(hw, hf, zf), Vector3(-hw, hf, zf)]:
+		st.add_vertex(v)
+	st.generate_normals()
+	var mesh: ArrayMesh = st.commit()
+	var cs := CollisionShape3D.new()
+	var shape: ConcavePolygonShape3D = mesh.create_trimesh_shape()
+	shape.backface_collision = true
+	cs.shape = shape
+	cs.transform = xf
+	body.add_child(cs)
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.transform = xf
+	mi.material_override = _mat(Color(0.9, 0.55, 0.1), 0.8)
+	add_child(mi)
+
+
+## Dirt cuts are not a free ride: boulders in a slalom just off the centre line. A clean line misses them (the AI
+## drives it), a car that is sliding about does not.
+func _make_boulders(body: StaticBody3D) -> void:
+	var xfs: Array = []
+	for sc in shortcuts:
+		if sc.get("jump", false):
+			continue
+		var p: PackedVector3Array = sc["pts"]
+		var total: float = p[0].distance_to(p[p.size() - 1])
+		var step: float = total / float(p.size() - 1)
+		var s: float = 30.0
+		var side: float = 1.0
+		while s < total - 30.0:
+			var k: int = int(s / step)
+			var d: Vector3 = (p[mini(k + 1, p.size() - 1)] - p[k]).normalized()
+			var pos: Vector3 = p[k] + d.cross(Vector3.UP) * 2.8 * side
+			pos.y = 0.0
+			var cs := CollisionShape3D.new()
+			var shape := CylinderShape3D.new()
+			shape.radius = 1.0
+			shape.height = 1.8
+			cs.shape = shape
+			cs.position = pos + Vector3(0, 0.9, 0)
+			body.add_child(cs)
+			xfs.append(Transform3D(Basis.from_scale(Vector3(2.3, 1.8, 2.3)), pos + Vector3(0, 0.9, 0)))
+			side = -side
+			s += 30.0
+	if not xfs.is_empty():
+		_add_multimesh_xf(_cyl_mesh(0.5, 1.0, 0.8), _mat(Color(0.45, 0.4, 0.36), 1.0), xfs)
+
+
+## A jump pit swallows whoever drops into it low and slow: back on the road, time lost.
+func _physics_process(_delta: float) -> void:
+	if jumps.is_empty():
+		return
+	for car in get_tree().get_nodes_in_group("cars"):
+		if not is_instance_valid(car) or car.track != self or car.gone:
+			continue
+		for j in jumps:
+			var rel: Vector3 = car.global_position - (j["o"] as Vector3)
+			var s: float = rel.dot(j["d"])
+			var t: float = rel.dot((j["d"] as Vector3).cross(Vector3.UP))
+			if s > float(j["s0"]) + 0.5 and s < float(j["s1"]) - 1.5 and absf(t) < float(j["hw"]) and car.global_position.y < 0.7:
+				car.respawn()
+
+
+## The open strip between the road and the railing: dirt you can drive onto (slow and loose) before you hit anything.
+func _make_verge() -> void:
+	var half: float = width * 0.5
+	var mat: StandardMaterial3D = _mat(map.get("verge", Color(0.42, 0.33, 0.2)), 1.0)
+	var per: int = maxi(1, int(CELL / spacing))
+	for c0 in range(0, count, per):
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		for i in range(c0, mini(c0 + per, count)):
+			var j: int = (i + 1) % count
+			for side in [-1.0, 1.0]:
+				var in0: Vector3 = points[i] + right_at(i) * (half * side) + Vector3(0, 0.03, 0)
+				var out0: Vector3 = points[i] + right_at(i) * ((half + verge) * side) + Vector3(0, 0.03, 0)
+				var in1: Vector3 = points[j] + right_at(j) * (half * side) + Vector3(0, 0.03, 0)
+				var out1: Vector3 = points[j] + right_at(j) * ((half + verge) * side) + Vector3(0, 0.03, 0)
+				var quad: Array = [in0, in1, out0, out0, in1, out1] if side > 0.0 else [out0, out1, in0, in0, out1, in1]   # front face up on both sides
+				for v in quad:
+					st.set_normal(Vector3.UP)
+					st.add_vertex(v)
+		var mi := MeshInstance3D.new()
+		mi.mesh = st.commit()
+		mi.material_override = mat
+		add_child(mi)
+
+
+## Solid trees, boulders or blocks scattered in the verge: a mistake costs speed, not just a scrape on the railing.
+func _make_verge_props() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 777
+	var body := StaticBody3D.new()
+	body.name = "VergeProps"
+	add_child(body)
+	var kind: String = String(map["scenery"])
+	var step: int = maxi(2, int(17.0 / spacing))
+	var items: Array = []   # [position, scale]
+	var big: Array = []     # rocks: Transform3D
+	for i in range(6, count - 6, step):
+		if rng.randf() < 0.25:
+			continue
+		var side: float = -1.0 if rng.randf() < 0.5 else 1.0
+		var lat: float = width * 0.5 + rng.randf_range(2.0, maxf(2.5, verge - 1.5))
+		var pos: Vector3 = points[i] + right_at(i) * (lat * side) + tangents[i] * (rng.randf_range(-0.5, 0.5) * spacing)
+		pos.y = 0.0
+		if _dist_to_main(pos) < width * 0.5 + 2.0 or _on_cut(pos, SC_WIDTH * 0.5 + 6.0):
+			continue
+		var cs := CollisionShape3D.new()
+		if kind == "rocks":
+			var r: float = rng.randf_range(1.2, 2.2)
+			var h: float = rng.randf_range(2.0, 4.0)
+			var shape := CylinderShape3D.new()
+			shape.radius = r * 0.45
+			shape.height = h
+			cs.shape = shape
+			cs.position = pos + Vector3(0, h * 0.5, 0)
+			big.append(Transform3D(Basis(Vector3.UP, rng.randf() * TAU) * Basis.from_scale(Vector3(r, h, r)), cs.position))
+		elif kind == "city":
+			var shape := BoxShape3D.new()
+			shape.size = Vector3(2.0, 1.2, 2.0)
+			cs.shape = shape
+			cs.position = pos + Vector3(0, 0.6, 0)
+			big.append(Transform3D(Basis.from_scale(shape.size), cs.position))
+		else:   # pines, palms
+			var sc: float = rng.randf_range(0.8, 1.4)
+			var shape := CylinderShape3D.new()
+			shape.radius = 0.5 * sc
+			shape.height = 4.0
+			cs.shape = shape
+			cs.position = pos + Vector3(0, 2.0, 0)
+			items.append([pos, sc])
+		body.add_child(cs)
+	match kind:
+		"rocks":
+			_add_multimesh_xf(_cyl_mesh(0.5, 1.0, 0.85), _mat(Color(0.62, 0.32, 0.2)), big)
+		"city":
+			_add_multimesh_xf(_box_mesh(Vector3.ONE), _mat(Color(0.55, 0.55, 0.58), 0.9), big)
+		"palms":
+			_add_multimesh(_cyl_mesh(0.22, 8.0), _mat(Color(0.45, 0.33, 0.2)), items, 4.0)
+			_add_multimesh(_cone_mesh(3.4, 1.4), _mat(Color(0.18, 0.42, 0.16)), items, 8.3)
+		_:
+			_add_multimesh(_cyl_mesh(0.35, 3.0), _mat(Color(0.3, 0.2, 0.12)), items, 1.5)
+			_add_multimesh(_cone_mesh(2.6, 7.0), _mat(Color(0.1, 0.32, 0.14)), items, 6.0)
 
 
 func _dist_to_main(pos: Vector3) -> float:
@@ -476,7 +733,7 @@ func _make_start_gantry() -> void:
 func _make_scenery() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 4242
-	var half: float = width * 0.5 + wall_thickness
+	var half: float = width * 0.5 + verge + wall_thickness
 	match map["scenery"]:
 		"pines":
 			var trunks: Array = []
@@ -484,7 +741,7 @@ func _make_scenery() -> void:
 				for side in [-1.0, 1.0]:
 					for k in range(2):
 						var pos: Vector3 = _roadside(rng, i, side, half + 6.0, 38.0)
-						if _dist_to_road(pos) > half + 5.0:
+						if _dist_to_road(pos) > half + 5.0 and not _on_cut(pos, SC_WIDTH * 0.5 + 9.0):
 							trunks.append([pos, rng.randf_range(0.8, 1.7)])
 			_add_multimesh(_cyl_mesh(0.35, 3.0), _mat(Color(0.3, 0.2, 0.12)), trunks, 1.5)
 			_add_multimesh(_cone_mesh(2.6, 7.0), _mat(Color(0.1, 0.32, 0.14)), trunks, 6.0)
@@ -493,7 +750,7 @@ func _make_scenery() -> void:
 			for i in range(0, count, 2):
 				for side in [-1.0, 1.0]:
 					var pos: Vector3 = _roadside(rng, i, side, half + 4.0, 30.0)
-					if _dist_to_road(pos) > half + 3.0:
+					if _dist_to_road(pos) > half + 3.0 and not _on_cut(pos, SC_WIDTH * 0.5 + 9.0):
 						palms.append([pos, rng.randf_range(0.8, 1.3)])
 			_add_multimesh(_cyl_mesh(0.22, 8.0), _mat(Color(0.45, 0.33, 0.2)), palms, 4.0)
 			_add_multimesh(_cone_mesh(3.4, 1.4), _mat(Color(0.18, 0.42, 0.16)), palms, 8.3)
@@ -504,7 +761,7 @@ func _make_scenery() -> void:
 				for side in [-1.0, 1.0]:
 					var pos: Vector3 = _roadside(rng, i, side, half + 8.0, 50.0)
 					var r: float = rng.randf_range(3.0, 9.0)
-					if _dist_to_road(pos) > half + r + 2.0:
+					if _dist_to_road(pos) > half + r + 2.0 and not _on_cut(pos, SC_WIDTH * 0.5 + 9.0 + r):
 						var h: float = rng.randf_range(6.0, 30.0)
 						rocks.append(Transform3D(Basis(Vector3.UP, rng.randf() * TAU) * Basis.from_scale(Vector3(r, h, r * rng.randf_range(0.7, 1.3))), pos + Vector3(0, h * 0.5, 0)))
 			_add_multimesh_xf(_cyl_mesh(0.5, 1.0, 0.85), _mat(Color(0.62, 0.32, 0.2)), rocks)
@@ -514,7 +771,7 @@ func _make_scenery() -> void:
 				for side in [-1.0, 1.0]:
 					var w: float = rng.randf_range(10.0, 24.0)
 					var pos: Vector3 = _roadside(rng, i, side, half + 6.0 + w * 0.5, 30.0)
-					if _dist_to_road(pos) > half + w * 0.75 + 2.0:
+					if _dist_to_road(pos) > half + w * 0.75 + 2.0 and not _on_cut(pos, SC_WIDTH * 0.5 + 9.0 + w * 0.5):
 						var h: float = rng.randf_range(14.0, 70.0)
 						var b := Basis.looking_at(tangents[i], Vector3.UP)
 						blocks.append(Transform3D(b * Basis.from_scale(Vector3(w, h, w * rng.randf_range(0.7, 1.2))), pos + Vector3(0, h * 0.5, 0)))
@@ -529,8 +786,10 @@ func _make_scenery() -> void:
 	var posts: Array = []
 	for i in range(0, count, every):
 		for side in [-1.0, 1.0]:
-			var pos: Vector3 = points[i] + right_at(i) * ((width * 0.5 + wall_thickness + 1.5) * side)
+			var pos: Vector3 = points[i] + right_at(i) * ((width * 0.5 + verge + wall_thickness + 1.5) * side)
 			pos.y = 0.0
+			if _on_cut(pos, SC_WIDTH * 0.5 + 4.0):
+				continue   # no lamp post in the mouth of a dirt cut
 			posts.append([pos, 1.0])
 	_add_multimesh(_box_mesh(Vector3(0.25, 6.0, 0.25)), _mat(Color(0.25, 0.25, 0.3)), posts, 3.0)
 	var glow := _mat(Color(1.0, 0.85, 0.5))

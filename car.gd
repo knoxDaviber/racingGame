@@ -24,12 +24,22 @@ const STEER_RATE: float = 6.0          # rad/s the wheels can swing
 const YAW_GRIP_G: float = 19.0         # lateral accel (m/s^2) the yaw assist aims for in normal driving
 const YAW_ASSIST: float = 3.0          # how hard the assist drives yaw rate toward the target (1/s)
 const DRIFT_SLIP: float = 0.5          # slide angle (rad, ~29 deg) a normal handbrake drift settles at
-const DRIFT_SLIP_EXTRA: float = 0.8    # extra angle you can only reach by holding full lock + handbrake for ~2 s
+const DRIFT_SLIP_EXTRA: float = 0.1    # extra angle from holding full lock for ~2 s (tops out near 46 deg: tyres bite back past that, like endless-drive)
+const DRIFT_CARRY: float = 9.0         # m/s^2 at 90 deg slip: the slide drives you forward instead of scrubbing all your speed
+const DRIFT_MIN_SPEED: float = 10.0
 const DRIFT_K: float = 4.5             # how quickly the slide angle converges (1/s)
 const DRIFT_ASSIST: float = 9.0
 const HANDBRAKE_FORCE: float = 70.0    # rear-wheel brake while SPACE is held: the handbrake costs speed
 const HANDBRAKE_ENGINE: float = 0.3    # front wheels keep this share of engine power on the handbrake
-const DRIFT_HOLD_GRIP: float = 0.75    # rear grip while a drift is held on throttle after letting go of SPACE
+const DRIFT_HOLD_GRIP: float = 0.75    # (unused now: a drift lasts exactly as long as SPACE is held)
+# Mario Kart style drift: hold SPACE (+ steer, gas) and the slide lasts as long as you hold it. The slide keeps most of your
+# speed (DRIFT_KEEP of the speed you entered with) and charges a mini-turbo; letting go fires it (3 tiers).
+const DRIFT_KEEP: float = 0.9          # share of the entry speed a held drift never drops below (while on the gas)
+const MT_TIERS: Array = [0.55, 1.2, 2.0]   # seconds of drift for tier 1 / 2 / 3 (quick: a short slide already pays off)
+const MT_BOOST: Array = [1.0, 1.6, 2.4]    # seconds of boost each tier gives
+const MT_KICK: Array = [3.5, 6.0, 9.0]     # instant speed (m/s) added the moment the boost fires: the punch
+const MT_POWER: float = 2.4                # engine force multiplier during a mini-turbo (nitro is 1.9)
+const MT_TOP: float = 1.3                  # top speed multiplier during a mini-turbo (nitro is 1.22)
 
 # --- nitrous (everyone has it). A full tank is ~3 s of boost; it refills slowly, and fast while drifting.
 const NITRO_POWER: float = 1.9         # engine force multiplier while boosting
@@ -38,10 +48,26 @@ const NITRO_DRAIN: float = 0.33        # tank per second
 const NITRO_REFILL: float = 0.035      # tank per second, always
 const NITRO_DRIFT_REFILL: float = 0.3  # extra tank per second while sliding
 const SPIKE_TIME: float = 2.6          # seconds of shredded tyres after a spike strip
+const NITRO_CUT_REFILL: float = 0.12   # extra tank per second while on a dirt shortcut (the reward for the risk)
+
+# --- air control: a tilted car must not hang in the air or sit on two wheels
+const AIR_GRAVITY: float = 1.7         # gravity multiplier while all four wheels are off the ground
+const AIR_ROLL_TORQUE: float = 7000.0  # levels the car sideways in flight
+const AIR_PITCH_TORQUE: float = 3500.0 # the nose follows the flight path
+const TILT_ROLL_TORQUE: float = 4500.0 # righting torque while on 1-3 wheels
+const VERGE_DRAG: float = 5.0          # m/s^2 of drag in the dirt beside the road
+
+# --- manual gearbox (the player's "stick" mode). Top speed per gear (m/s); gear 6 is a little above the automatic's top_speed.
+const GEAR_TOP: Array = [0.0, 13.0, 21.0, 29.0, 37.0, 44.0, 50.0]
+const GEAR_PULL: Array = [0.0, 1.5, 1.3, 1.15, 1.0, 0.9, 0.8]   # engine force multiplier per gear
+const SHIFT_UP_TIME: float = 0.24      # power is cut this long on an upshift (the clutch is out)
+const SHIFT_DOWN_TIME: float = 0.14
+const MANUAL_STEER_RATE: float = 4.6   # heavier steering than the automatic's STEER_RATE
 
 const SND_ROBBER: AudioStream = preload("res://Resources/Audio/engine_robber.ogg")
 const SND_COP: AudioStream = preload("res://Resources/Audio/engine_cop.ogg")
 const SND_SIREN: AudioStream = preload("res://Resources/Audio/siren.ogg")
+const SMOKE_TEX: Array = [preload("res://Resources/Smoke/whitePuff00.png"), preload("res://Resources/Smoke/whitePuff03.png"), preload("res://Resources/Smoke/whitePuff05.png")]   # Kenney Smoke Particles (CC0)
 const SND_SKID: AudioStream = preload("res://Resources/Audio/skid.ogg")
 const SND_NITRO: AudioStream = preload("res://Resources/Audio/nitro.ogg")
 const SND_CRASH: AudioStream = preload("res://Resources/Audio/crash.ogg")
@@ -73,6 +99,16 @@ var in_throttle: float = 0.0
 var in_brake: float = 0.0
 var in_steer: float = 0.0     # +1 = left
 var in_handbrake: bool = false
+var manual: bool = false      # stick-shift mode (player only, set by Main from the settings)
+var gear: int = 1             # -1 = R, 0 = N, 1..6
+var rpm_f: float = 0.0        # engine speed 0..1 (1 = redline) for the HUD and the engine sound
+var shift_t: float = 0.0      # > 0: mid-shift, no power
+var kick: float = 0.0         # camera punch 0..1 from shifts and hits, decays; Main reads it
+var air_t: float = 0.0        # seconds with no wheel on the ground
+var on_verge: bool = false    # beside the road (dirt: slow and loose)
+var on_cut: bool = false      # on a shortcut
+var _shift_up_key: bool = false
+var _shift_down_key: bool = false
 
 var wheels: Array = []
 var visual: Node3D
@@ -86,6 +122,10 @@ var reset_cd: float = 0.0
 var prev_vel_ang: float = 0.0
 var drift_t: float = 0.0
 var hb_amount: float = 0.0     # 0..1 how engaged the handbrake slide is
+var drift_boost: bool = true    # settings: the Mario Kart style mini-turbo on/off (set by Main for the player)
+var drift_charge: float = 0.0   # seconds spent in the current drift (steering into the turn charges at full rate)
+var drift_floor: float = 0.0    # speed a held drift is kept above (m/s)
+var mt_t: float = 0.0           # seconds of mini-turbo boost left
 var drifting: bool = false     # a slide started with the handbrake, held on throttle + steering
 var drift_dir: float = 0.0     # +1 = drifting left (in_steer sign when it started)
 var scripted: bool = false     # test harness sets in_* directly
@@ -124,8 +164,9 @@ var snd_crash: AudioStreamPlayer3D
 var crash_cd: float = 0.0
 var prev_v: Vector3 = Vector3.ZERO
 var flames: Array = []
-var headlight: SpotLight3D = null
-var light_pool: MeshInstance3D = null
+var smoke_ramp: Gradient = null
+var smokes: Array = []   # tyre smoke puffs at the rear wheels while sliding
+var headlights: Array = []
 
 
 func _ready() -> void:
@@ -303,30 +344,48 @@ func _build_extras() -> void:
 		f.visible = false
 		visual.add_child(f)
 		flames.append(f)
-	# fake headlights for everyone: a soft additive light pool on the road (no real light, no shadow)
-	var tex := GradientTexture2D.new()
-	tex.fill = GradientTexture2D.FILL_RADIAL
-	tex.fill_from = Vector2(0.5, 0.5)
-	tex.fill_to = Vector2(0.5, 0.0)
-	var g := Gradient.new()
-	g.set_color(0, Color(1, 0.95, 0.8, 1))
-	g.set_color(1, Color(0, 0, 0, 1))
-	tex.gradient = g
-	var pm := StandardMaterial3D.new()
-	pm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	pm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	pm.albedo_texture = tex
-	pm.albedo_color = Color(0.55, 0.52, 0.45)
-	pm.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
-	light_pool = MeshInstance3D.new()
-	var q := PlaneMesh.new()
-	q.size = Vector2(7.0, 13.0)
-	light_pool.mesh = q
-	light_pool.material_override = pm
-	light_pool.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	light_pool.position = Vector3(0, -0.12, -8.5)
-	light_pool.visible = false
-	visual.add_child(light_pool)
+	_build_smoke()
+
+
+## Tyre smoke: grey puffs left in the world behind each rear wheel while the car slides or drifts.
+func _build_smoke() -> void:
+	var ramp := Gradient.new()
+	smoke_ramp = ramp
+	ramp.set_color(0, Color(1.0, 1.0, 1.0, 0.7))
+	ramp.set_color(1, Color(0.8, 0.8, 0.85, 0.0))
+	var tex_i: int = 0
+	for s in [-1.0, 1.0]:
+		var sm := StandardMaterial3D.new()
+		sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		sm.vertex_color_use_as_albedo = true
+		sm.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+		sm.albedo_texture = SMOKE_TEX[tex_i % SMOKE_TEX.size()]
+		sm.billboard_keep_scale = true
+		tex_i += 3
+		var quad := QuadMesh.new()
+		quad.size = Vector2(1.0, 1.0)
+		quad.material = sm
+		var p := CPUParticles3D.new()
+		p.mesh = quad
+		p.amount = 24
+		p.lifetime = 1.0
+		p.local_coords = false
+		p.emitting = false
+		p.direction = Vector3(0, 1, 0)
+		p.spread = 35.0
+		p.gravity = Vector3(0, 0.5, 0)
+		p.initial_velocity_min = 0.3
+		p.initial_velocity_max = 1.2
+		p.angle_min = -180.0
+		p.angle_max = 180.0
+		p.scale_amount_min = 1.4
+		p.scale_amount_max = 2.6
+		p.color_ramp = ramp
+		p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		p.position = Vector3(0.8 * s, 0.1, 1.4)
+		visual.add_child(p)
+		smokes.append(p)
 
 
 func _snd(stream: AudioStream, db: float, unit: float) -> AudioStreamPlayer3D:
@@ -342,21 +401,25 @@ func _snd(stream: AudioStream, db: float, unit: float) -> AudioStreamPlayer3D:
 	return p
 
 
-## Night legs: everyone gets the fake light pool; only the player gets a real (shadowless) spotlight.
+## Night legs: your car gets two real spotlights (the same pair endless-drive uses); the AI cars only show their
+## glowing lenses. The spots are children of `visual`, so they tilt and bounce with the body like real headlights.
 func set_night(on: bool) -> void:
 	night = on
-	light_pool.visible = on
-	if is_player and on and headlight == null:
-		headlight = SpotLight3D.new()
-		headlight.spot_range = 55.0
-		headlight.spot_angle = 32.0
-		headlight.light_energy = 4.0
-		headlight.light_color = Color(1.0, 0.95, 0.85)
-		headlight.position = Vector3(0, 0.5, -2.3)
-		headlight.rotation_degrees = Vector3(-6, 0, 0)
-		visual.add_child(headlight)
-	if headlight != null:
-		headlight.visible = on
+	if is_player and on and headlights.is_empty():
+		for x in [-0.6, 0.6]:
+			var l := SpotLight3D.new()
+			l.position = Vector3(x, 0.55, -2.0)
+			l.rotation_degrees = Vector3(-3, 0, 0)
+			l.spot_range = 90.0
+			l.spot_angle = 38.0
+			l.spot_attenuation = 0.6
+			l.light_energy = 9.0
+			l.light_color = Color(1.0, 0.93, 0.8)
+			l.shadow_enabled = false   # the compatibility renderer (web) pays dearly for shadows
+			visual.add_child(l)
+			headlights.append(l)
+	for l in headlights:
+		l.visible = on
 
 
 ## Repaint the car's body (the Garage uses this). Cops keep their police paint.
@@ -389,23 +452,34 @@ func _update_audio(delta: float) -> void:
 	var near: bool = cam == null or cam.global_position.distance_squared_to(global_position) < AUDIO_RANGE * AUDIO_RANGE
 	set_sounds(near and visible)
 	if not near:
+		for sp in smokes:
+			sp.emitting = false
 		return
 	if dv > 5.0 and crash_cd <= 0.0 and not calibrating:
 		snd_crash.volume_db = VOL - 4.0 + linear_to_db(clampf(dv / 18.0, 0.15, 1.0))
 		snd_crash.pitch_scale = randf_range(0.8, 1.15)
 		snd_crash.play()
 		crash_cd = 0.35
+		kick = maxf(kick, clampf(dv / 14.0, 0.25, 1.0))
 	var speed: float = linear_velocity.length()
 	var rpm: float = clampf(speed / top_speed, 0.0, 1.3)
+	if manual_active():
+		rpm = rpm_f
 	snd_engine.pitch_scale = 0.55 + rpm * 1.25 + in_throttle * 0.12 + (0.15 if boosting else 0.0)
 	snd_engine.volume_db = VOL + lerpf(-16.0, -5.0, clampf(in_throttle * 0.6 + rpm * 0.5, 0.0, 1.0))
 	var slide: float = 0.0
 	if wheels_in_contact() >= 2 and speed > 8.0:
 		slide = clampf((absf(slip_angle()) - 0.12) / 0.35, 0.0, 1.0)
 		slide = maxf(slide, hb_amount * 0.8)
+	var smoking: bool = slide > 0.25 and visible
+	if smoke_ramp != null:   # mini-turbo tier tints the smoke: white, blue, orange, purple (like the sparks in Mario Kart)
+		var tc: Color = [Color(1, 1, 1), Color(0.5, 0.75, 1.0), Color(1.0, 0.65, 0.25), Color(0.8, 0.45, 1.0)][drift_tier() if drifting else 0]
+		smoke_ramp.set_color(0, Color(tc.r, tc.g, tc.b, 0.75))
+	for sp in smokes:
+		sp.emitting = smoking
 	snd_skid.volume_db = VOL - 10.0 + linear_to_db(maxf(slide, 0.0001))
 	snd_skid.pitch_scale = 0.9 + speed / 160.0
-	snd_nitro.volume_db = VOL - 8.0 if boosting else -80.0
+	snd_nitro.volume_db = VOL - 8.0 if (boosting or mt_t > 0.0) else -80.0
 	if snd_siren != null:   # only the cop Main picks as `siren_on` is heard: one siren, never a chorus
 		snd_siren.volume_db = VOL - 6.0 if controls_enabled and siren_on and not siren_muted else -80.0
 
@@ -415,6 +489,8 @@ func _update_nitro(delta: float, fspeed: float) -> void:
 	var slide: float = absf(slip_angle())
 	if slide > 0.2 and absf(fspeed) > 10.0 and wheels_in_contact() >= 2:
 		nitro += NITRO_DRIFT_REFILL * clampf((slide - 0.2) / 0.3, 0.0, 1.0) * delta
+	if on_cut:
+		nitro += NITRO_CUT_REFILL * delta
 	if boosting:
 		nitro -= NITRO_DRAIN * delta
 		if nitro <= 0.0 or not in_nitro or in_brake > 0.05:
@@ -423,9 +499,10 @@ func _update_nitro(delta: float, fspeed: float) -> void:
 		nitro += NITRO_REFILL * delta
 		boosting = in_nitro and nitro > 0.15 and in_brake < 0.05 and fspeed > 2.0
 	nitro = clampf(nitro, 0.0, 1.0)
+	mt_t = maxf(0.0, mt_t - delta)
 	for f in flames:
-		f.visible = boosting
-		if boosting:
+		f.visible = boosting or mt_t > 0.0
+		if boosting or mt_t > 0.0:
 			f.scale = Vector3(1.0, randf_range(0.8, 1.6), 1.0)
 			f.position.z = 2.2 + f.scale.y * 0.5
 
@@ -485,7 +562,8 @@ func teleport(xf: Transform3D) -> void:
 	flipped_t = 0.0
 	stuck_t = 0.0
 	reverse_t = 0.0
-	drifting = false
+	_stop_drift(false)
+	mt_t = 0.0
 
 
 ## Busted cars stay visible but stop colliding with other cars (they'd be a wreck
@@ -496,6 +574,11 @@ func set_ghost(on: bool) -> void:
 
 
 func respawn() -> void:
+	if not is_instance_valid(track):
+		push_warning("respawn: %s has a freed track" % name)
+		flipped_t = 0.0
+		watch_t = 0.0
+		return
 	sc_plan = -1
 	var i: int = track.nearest_index(global_position, idx, 30)
 	_set_idx(i)
@@ -538,7 +621,7 @@ func _apply_grip() -> void:
 		if not w.use_as_steering:
 			grip *= lerpf(DRIFT_HOLD_GRIP if drifting else 1.0, HANDBRAKE_REAR_GRIP, hb_amount)
 		if on_dirt:
-			grip *= track.SC_GRIP
+			grip *= track.VERGE_GRIP if on_verge else track.SC_GRIP
 		if spiked_t > 0.0:
 			grip *= 0.7
 		w.wheel_friction_slip = grip
@@ -555,15 +638,15 @@ func _yaw_assist(delta: float, fspeed: float) -> void:
 	var vang: float = atan2(-v.x, -v.z)
 	var w_v: float = clampf(wrapf(vang - prev_vel_ang, -PI, PI) / maxf(delta, 0.0001), -3.0, 3.0)
 	prev_vel_ang = vang
-	if wheels_in_contact() < 2 or fspeed < 3.0:
+	if wheels_in_contact() < 3 or fspeed < 3.0 or global_transform.basis.y.dot(Vector3.UP) < 0.8:
 		drift_t = 0.0
-		drifting = false
+		_stop_drift(false)
 		return
 	var w: float = angular_velocity.y
 	var beta: float = slip_angle()
 	var target: float
 	var gain: float
-	_update_drift(fspeed, beta)
+	_update_drift(fspeed, beta, delta)
 	if drifting:
 		# steer INTO the drift = wider angle (and, held ~2 s, wider still); a little steer = medium angle;
 		# counter-steer = straighten up.
@@ -578,6 +661,12 @@ func _yaw_assist(delta: float, fspeed: float) -> void:
 		elif into < 0.5:
 			amount = DRIFT_SLIP * 0.75
 		var slip_t: float = -drift_dir * amount
+		if in_throttle > 0.05:   # the slide carries you forward (endless-drive: a drift does not scrub your speed away)
+			apply_central_force(forward_world() * mass * DRIFT_CARRY * absf(sin(beta)))
+			var hs: float = Vector2(linear_velocity.x, linear_velocity.z).length()
+			if hs > 1.0 and hs < drift_floor:   # the slide only costs a little speed, never most of it
+				var vdir := Vector3(linear_velocity.x, 0.0, linear_velocity.z) / hs
+				apply_central_force(vdir * mass * clampf((drift_floor - hs) * 5.0, 0.0, 22.0))
 		target = w_v - DRIFT_K * (slip_t - beta)
 		# entry builds up with the handbrake (a stiff assist here kills the turn-in); held on throttle after
 		# SPACE is released, it keeps a firm grip on the angle
@@ -593,18 +682,42 @@ func _yaw_assist(delta: float, fspeed: float) -> void:
 	angular_velocity.y = w + (target - w) * clampf(gain * delta, 0.0, 1.0)
 
 
-## Start a drift with SPACE + steering at speed. After SPACE is let go it holds while you keep the gas on
-## and steer into the turn; braking, lifting off, centring the wheel or straightening out ends it.
-func _update_drift(fspeed: float, beta: float) -> void:
+## Start a drift with SPACE + steering + gas at speed. It lasts as long as SPACE is held (and you do not brake or
+## stall). Steering into the turn charges the mini-turbo at full rate, counter-steering at half; letting go fires it.
+func _update_drift(fspeed: float, beta: float, delta: float) -> void:
 	if not drifting:
-		if hb_amount > 0.25 and absf(in_steer) > 0.5 and fspeed > 10.0:
+		if hb_amount > 0.25 and in_throttle > 0.05 and absf(in_steer) > 0.15 and fspeed > DRIFT_MIN_SPEED:
 			drifting = true
 			drift_dir = signf(in_steer)
+			drift_charge = 0.0
+			drift_floor = minf(fspeed, top_speed) * DRIFT_KEEP
 		return
-	var steer_into: bool = in_steer * drift_dir > 0.2
-	var holding: bool = in_handbrake or (in_throttle > 0.05 and steer_into and absf(beta) > 0.12)
-	if linear_velocity.length() < 8.0 or in_brake > 0.05 or not holding:
-		drifting = false
+	if drift_boost and absf(beta) > 0.12:   # only a real slide charges
+		drift_charge += delta * (1.0 if in_steer * drift_dir > 0.2 else 0.5)
+	drift_floor = maxf(drift_floor, minf(fspeed, top_speed) * DRIFT_KEEP * 0.98) if in_throttle > 0.05 else drift_floor
+	if linear_velocity.length() < 6.0 or in_brake > 0.05 or not in_handbrake:
+		_stop_drift(in_handbrake == false and in_brake < 0.05)
+
+
+## Which mini-turbo tier the current drift has reached (0 = none yet).
+func drift_tier() -> int:
+	var t: int = 0
+	for i in range(MT_TIERS.size()):
+		if drift_charge >= float(MT_TIERS[i]):
+			t = i + 1
+	return t
+
+
+## End the drift. `award` = it ended by letting go of SPACE: fire the mini-turbo the drift earned.
+func _stop_drift(award: bool) -> void:
+	if drifting and award and drift_boost:
+		var t: int = drift_tier()
+		if t > 0:
+			mt_t = maxf(mt_t, float(MT_BOOST[t - 1]))
+			apply_central_impulse(forward_world() * mass * float(MT_KICK[t - 1]))   # the punch: speed jumps at once
+			kick = maxf(kick, 0.6 + 0.15 * float(t))
+	drifting = false
+	drift_charge = 0.0
 
 
 func _animate_siren(delta: float) -> void:
@@ -636,7 +749,9 @@ func _physics_process(delta: float) -> void:
 		model.physics_tick(self, wheels)
 	if track != null:
 		_set_idx(track.locate(global_position, idx))
-		on_dirt = track.last_on_shortcut
+		on_cut = track.last_on_shortcut
+		on_verge = track.last_off_road and not on_cut
+		on_dirt = on_cut or on_verge
 	_update_audio(delta)
 	spiked_t = maxf(0.0, spiked_t - delta)
 	if is_cop:
@@ -645,6 +760,10 @@ func _physics_process(delta: float) -> void:
 
 	var speed: float = linear_velocity.length()
 	apply_central_force(Vector3.DOWN * speed * speed * 0.5)  # a little downforce
+	_stabilize(delta)
+	kick = maxf(0.0, kick - 3.5 * delta)
+	if on_verge and wheels_in_contact() > 0:   # dirt beside the road: slows you down well before the railing
+		apply_central_force(-linear_velocity.normalized() * VERGE_DRAG * mass)
 
 	if calibrating:
 		return  # Main drives engine/brake directly during the self-test
@@ -658,6 +777,8 @@ func _physics_process(delta: float) -> void:
 		steering = move_toward(steering, 0.0, 4.0 * delta)
 		_set_handbrake(false, delta)
 		boosting = false
+		gear = 1
+		shift_t = 0.0
 		_update_nitro(delta, 0.0)
 		return
 
@@ -672,30 +793,140 @@ func _physics_process(delta: float) -> void:
 	_check_flip(delta)
 
 
+func manual_active() -> bool:
+	return manual and is_player and not auto_drive
+
+
+## Gear change (manual mode). Q/E shift; reverse only from a standstill. A shift cuts the power for a moment and
+## thumps the drivetrain: an upshift under power dips your speed, a downshift into too high a rev range engine-brakes hard.
+func _shift(dir: int) -> void:
+	var g: int = gear + dir
+	if g > 6 or g < -1:
+		return
+	var fs: float = forward_speed()
+	if g == -1 and absf(fs) > 3.0:
+		return   # no reverse at speed
+	gear = g
+	shift_t = SHIFT_UP_TIME if dir > 0 else SHIFT_DOWN_TIME
+	kick = maxf(kick, 0.55 if dir > 0 else 0.4)
+	if g >= 1 and fs > 3.0:
+		var ratio: float = fs / GEAR_TOP[g]
+		if dir > 0 and in_throttle > 0.05:
+			apply_central_impulse(-forward_world() * mass * 0.5)
+		elif dir < 0 and ratio > 1.0:
+			apply_central_impulse(-forward_world() * mass * minf((ratio - 1.0) * 6.0, 4.0))
+
+
+## Engine force and brake for the stick shift. Torque follows revs (weak when lugging, weak near the redline), the
+## limiter cuts power at the top of each gear, and lifting off gives real engine braking (hard in a low gear).
+func _manual_forces(delta: float, fspeed: float) -> Vector2:
+	shift_t = maxf(0.0, shift_t - delta)
+	var speed: float = absf(fspeed)
+	var eng: float = 0.0
+	var brk: float = 0.0
+	var ratio: float = 0.0
+	var rev_target: float
+	if gear >= 1:
+		ratio = speed / GEAR_TOP[gear]
+		rev_target = clampf(ratio, 0.14, 1.05)
+		if shift_t > 0.0:
+			rev_target *= 0.7
+	elif gear == 0:
+		rev_target = 0.16 + in_throttle * 0.8
+	else:
+		rev_target = 0.2 + in_throttle * 0.4
+	rpm_f = lerpf(rpm_f, rev_target, 1.0 - exp(-14.0 * delta))
+	# standing still: holding S selects reverse by itself, W selects 1st again (no need to hunt for R with Q)
+	if speed < 1.2 and shift_t <= 0.0:
+		if gear >= 0 and in_brake > 0.05 and in_throttle < 0.05:
+			gear = -1
+		elif gear <= 0 and in_throttle > 0.05 and in_brake < 0.05:
+			gear = 1
+	if gear == 0:
+		return Vector2(0.0, 3.0)
+	if gear == -1:   # reverse: S backs up, W brakes (and, once stopped, puts you in 1st)
+		if in_brake > 0.05 and fspeed > -12.0:
+			eng = -REVERSE_FORCE * in_brake
+		if in_throttle > 0.05:
+			brk = BRAKE_FORCE * in_throttle
+		return Vector2(eng, brk)
+	var limit: float = NITRO_TOP if boosting else (MT_TOP if mt_t > 0.0 else 1.0)
+	if in_brake > 0.05:
+		brk = BRAKE_FORCE * in_brake
+	elif in_throttle > 0.05 or boosting or mt_t > 0.0:
+		if shift_t <= 0.0 and ratio < limit and fspeed > -1.5:
+			var curve: float = lerpf(0.6, 1.0, smoothstep(0.0, 0.45, ratio)) * lerpf(1.0, 0.7, smoothstep(0.75, 1.0, ratio))
+			if ratio < 0.2 and gear >= 2:
+				curve *= 0.45   # lugging: too tall a gear for these revs
+			if ratio < 0.15 and gear >= 3:
+				curve *= 0.5
+			if spiked_t > 0.0:
+				curve *= 0.5
+			eng = ENGINE_FORCE * GEAR_PULL[gear] * (NITRO_POWER if boosting else (MT_POWER if mt_t > 0.0 else maxf(in_throttle, 0.0))) * curve
+		elif fspeed < -1.5:
+			brk = BRAKE_FORCE * in_throttle
+		else:
+			brk = 3.0 + minf(26.0 * ratio * ratio, 40.0) * 0.4   # on the limiter / mid-shift: the engine drags
+	else:
+		brk = 3.0 + minf(26.0 * ratio * ratio, 60.0)   # engine braking
+	return Vector2(eng, brk)
+
+
+## A tilted car must not hang in the air or sit on two wheels. In flight: more gravity, the nose follows the flight
+## path and the car levels out sideways. On 1-3 wheels: a righting torque.
+func _stabilize(delta: float) -> void:
+	var contacts: int = wheels_in_contact()
+	var f: Vector3 = forward_world()
+	var rr: Vector3 = f.cross(global_transform.basis.y)   # the car's own right-hand side
+	if contacts == 0:
+		air_t += delta
+		angular_damp = 2.0
+		var hv: float = Vector2(linear_velocity.x, linear_velocity.z).length()
+		var want_pitch: float = atan2(linear_velocity.y, maxf(hv, 6.0))
+		var pitch: float = asin(clampf(f.y, -1.0, 1.0))
+		# a level flight keeps its natural arc (jumps need the hang time); a tilted car is pulled down harder
+		var err: float = absf(rr.y) + absf(want_pitch - pitch)
+		gravity_scale = 1.0 + (AIR_GRAVITY - 1.0) * clampf((err - 0.15) / 0.5, 0.0, 1.0)
+		apply_torque(rr * clampf(want_pitch - pitch, -0.6, 0.6) * AIR_PITCH_TORQUE)
+		apply_torque(f * rr.y * AIR_ROLL_TORQUE)
+	else:
+		air_t = 0.0
+		gravity_scale = 1.0
+		angular_damp = 0.5
+		if contacts < 4 and absf(rr.y) > 0.2 and global_transform.basis.y.dot(Vector3.UP) > 0.2:
+			apply_torque(f * rr.y * TILT_ROLL_TORQUE)
+
+
 func _apply_controls(delta: float, fspeed: float) -> void:
 	var speed: float = absf(fspeed)
-	steering = move_toward(steering, in_steer * max_steer_angle(speed), STEER_RATE * delta)
+	var stick: bool = manual_active()
+	steering = move_toward(steering, in_steer * max_steer_angle(speed), (MANUAL_STEER_RATE if stick else STEER_RATE) * delta)
 
 	var eng: float = 0.0
 	var brk: float = 0.0
-	if in_brake > 0.05 and fspeed > 1.5:
+	if stick:
+		var mf: Vector2 = _manual_forces(delta, fspeed)
+		eng = mf.x
+		brk = mf.y
+	elif in_brake > 0.05 and fspeed > 1.5:
 		brk = BRAKE_FORCE * in_brake
 	elif in_brake > 0.05:
 		if fspeed > -12.0:
 			eng = -REVERSE_FORCE * in_brake
 	elif in_throttle > 0.05 and fspeed < -1.5:
 		brk = BRAKE_FORCE * in_throttle
-	elif in_throttle > 0.05 or boosting:
-		var top: float = top_speed * (NITRO_TOP if boosting else 1.0) * (0.55 if spiked_t > 0.0 else 1.0)
+	elif in_throttle > 0.05 or boosting or mt_t > 0.0:
+		var top: float = top_speed * (NITRO_TOP if boosting else (MT_TOP if mt_t > 0.0 else 1.0)) * (0.55 if spiked_t > 0.0 else 1.0)
 		var fade: float = clampf(1.0 - pow(speed / top, 2.0), 0.0, 1.0)
-		eng = ENGINE_FORCE * (NITRO_POWER if boosting else maxf(in_throttle, 0.0)) * fade
+		var power: float = NITRO_POWER if boosting else (MT_POWER if mt_t > 0.0 else maxf(in_throttle, 0.0))
+		eng = ENGINE_FORCE * power * fade
 	else:
 		brk = 3.0  # rolling resistance / engine braking
 	engine_force = eng * engine_scale
 	brake = brk
 	# Handbrake without steering: rear brake + less power, so it just slows you down (and, with no
 	# slide, earns no nitro). With steering it starts a drift instead (the slide itself costs speed).
-	var straight: float = 0.0 if drifting or absf(in_steer) > 0.3 else hb_amount
+	var straight: float = 0.0 if drifting or (in_throttle > 0.05 and absf(in_steer) > 0.15 and fspeed > DRIFT_MIN_SPEED) else hb_amount
 	if straight > 0.0:
 		for w in wheels:
 			if not w.use_as_steering:
@@ -733,6 +964,15 @@ func _read_player() -> void:
 		if f_down and not _siren_key_down:
 			siren_muted = not siren_muted
 		_siren_key_down = f_down
+	if manual:   # E = shift up, Q = shift down (R is reset, F is the siren)
+		var e_down: bool = Input.is_physical_key_pressed(KEY_E)
+		var q_down: bool = Input.is_physical_key_pressed(KEY_Q)
+		if e_down and not _shift_up_key:
+			_shift(1)
+		if q_down and not _shift_down_key:
+			_shift(-1)
+		_shift_up_key = e_down
+		_shift_down_key = q_down
 	if Input.is_physical_key_pressed(KEY_R) and reset_cd <= 0.0:
 		respawn()
 		reset_cd = 1.5
@@ -785,7 +1025,7 @@ func _drive_ai(delta: float, fspeed: float) -> void:
 		sc_plan = -1
 	elif sc_decided != sc:
 		sc_decided = sc
-		sc_plan = sc if (not is_cop and randf() < 0.3) else -1
+		sc_plan = sc if (not is_cop and randf() < 0.3 and not track.shortcuts[sc].get("jump", false)) else -1   # nobody AI takes the jump
 	if sc_plan >= 0 and not on_dirt and idx > int(track.shortcuts[sc_plan]["a"]) + 4:
 		sc_plan = -1   # missed the mouth (or got reset onto the main road): stay on the main road
 	var on_sc: bool = sc_plan >= 0 and sc == sc_plan

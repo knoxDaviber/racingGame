@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.5.0
+- **Time Trial** (New Game > Game mode): pick any map (the new HIGHLAND LOOP is Time Trial only), drive 3 laps alone, no cops.
+  Lap times show as you go; the best five totals and the best lap per map are saved (user://scores.cfg, scores.gd).
+- **HIGHLAND LOOP**: new map traced from a sketch: a squared-off corner section with a dirt cut, a hairpin sawtooth, and a
+  **ramp jump** over the lobe at the bottom right. Clear the pit (about 105 km/h or more) and you skip 400+ m of road;
+  too slow and you fall in (back on the road) or hit the landing. The AI never takes the jump.
+- **Open verge**: every map now has a strip of dirt (with solid trees, boulders or blocks) between the road and the railing.
+  Driving onto it is slow and loose (extra drag, less grip, an OFF ROAD warning) instead of an instant wall.
+- **Shortcuts**: dirt cuts now have boulders in a slalom just off the racing line, and give nitro while you are on them
+  (the reward for the risk).
+- **Manual gearbox** (Settings > Transmission): Q = shift down, E = shift up, 6 gears, rev limiter, power cut during a shift,
+  engine braking, a thump on every shift, heavier steering, engine sound follows the revs. Top gear reaches ~180 km/h (the
+  automatic tops out at ~160). Reverse: Q down to N, then R, from a standstill. Gear and rev bar on the HUD.
+- **Drift** now works like endless-drive: SPACE with the gas on (and steering) starts it, the slide carries you forward
+  instead of scrubbing speed, and the angle tops out near 45 degrees. SPACE without gas is the handbrake.
+- **Air time fix**: a tilted car no longer hangs in the air or sits on two wheels. In flight the car levels out sideways,
+  the nose follows the flight path and a tilted car is pulled down harder; on 1-3 wheels there is a righting torque.
+- **Headlights** (night levels): your car has two real spotlights like endless-drive; the flat light-pool quad is gone.
+- Test hooks: `ptest=tilt`, `ptest=gears`, `ptest=jump` (use `autotest perf` for the jump: the 4x time scale makes ramps unreliable),
+  `tt=<map>` runs a time trial.
+
 ## v0.4.2
 - "Match ends" is now **survival** / **last one standing**. Survival is what v0.4.1 called "all levels": the match always goes on
   to the last level, even if you are the only racer left (then it is you against the cops). The choice only shows up when an

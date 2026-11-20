@@ -7,11 +7,16 @@ extends Node3D
 ## bar = busted. Game modes: STORY (a place to reach per level) and POINTS (points per level, eliminations,
 ## cop strikes and two rankings: all of that lives in rules.gd). Results screens: results_view.gd.
 
-const VERSION: String = "v0.4.2"
+const VERSION: String = "v0.5.0"
 
 const TrackScript = preload("res://track.gd")
+const ScoresScript = preload("res://scores.gd")
+const TT_LAPS: int = 3          # a time trial is this many laps
+const CAMPAIGN_LEGS: int = 4    # story / points matches are the first four maps; later maps are time-trial only
 const CarScript = preload("res://car.gd")
+const CarModelScript = preload("res://car_model.gd")
 const MinimapScript = preload("res://minimap.gd")
+const GaugeScript = preload("res://gauges.gd")
 const SpeedFxScript = preload("res://speedfx.gd")
 const MenuScript = preload("res://menu.gd")
 const MarkersScript = preload("res://markers.gd")
@@ -22,7 +27,7 @@ const ResultsScript = preload("res://results_view.gd")
 const TIPS: Array = [
 	"The red ARREST bar fills when a cop is close. Full bar = busted. Drive away from them!",
 	"Cops are the blue dots on the minimap (top right).",
-	"Hold SPACE while turning to drift. Drifting refills your nitro fast.",
+	"Hold SPACE with the gas on to drift. Drifting refills your nitro fast.",
 	"SHIFT = nitro boost. Use it on straights to get away from cops.",
 	"Yellow signs mark dirt shortcuts: shorter, but slippery.",
 	"Flipped over or stuck? Press R.",
@@ -47,7 +52,7 @@ const POINTS_TIPS: Array = [
 	"Every place pays points: 1st 10, 2nd 7, 3rd 4, 4th 2. Getting busted pays nothing.",
 	"The red ARREST bar fills when a cop is close. Full bar = busted = 0 points. Drive away from them!",
 	"Cops are the blue dots on the minimap (top right).",
-	"Hold SPACE while turning to drift. Drifting refills your nitro fast.",
+	"Hold SPACE with the gas on to drift. Drifting refills your nitro fast.",
 	"SHIFT = nitro boost. Use it on straights to get away from cops.",
 	"Yellow signs mark dirt shortcuts: shorter, but slippery.",
 	"Flipped over or stuck? Press R.",
@@ -65,12 +70,13 @@ const LEGS: Array = [
 	[2, 3, 39.5, 47.5, 3.5, 22.0, 31.0],
 	[2, 3, 40.5, 48.0, 3.0, 16.0, 33.0],
 	[2, 4, 41.5, 49.0, 2.5, 12.0, 35.0],
+	[2, 0, 39.0, 47.0, 4.0, 0.0, 30.0],   # HIGHLAND LOOP: time trial only
 ]
 enum Obs { SPIKES, BARRICADE }
 
 # TITLE = main menu. BUSTED = level failed (ENTER retries). ESCAPED = story won. RESULTS = points screen after a level.
 # FINAL = end-of-match standings.
-enum State { SETTLE, TEST, LOADING, TITLE, COUNTDOWN, RACING, BUSTED, ESCAPED, PTEST, LEG_CLEAR, RESULTS, FINAL }
+enum State { SETTLE, TEST, LOADING, TITLE, COUNTDOWN, RACING, BUSTED, ESCAPED, PTEST, LEG_CLEAR, RESULTS, FINAL, TT_DONE }
 
 # name, colour, AI cruising speed (m/s), lane offset
 const ROBBERS: Array = [
@@ -100,6 +106,7 @@ const COP_LEGS: Array = [
 	[3, 1, 1.0],
 	[3, 2, 2.0],
 	[3, 2, 3.0],
+	[3, 0, 0.0],
 ]
 const WAIT_AFTER_YOU: float = 15.0   # points race: seconds the others get to finish after your own race is over (ENTER skips)
 const COP_LEVEL_CAP: float = 360.0   # cop side: a racer still on the road after this long counts as having got away
@@ -112,12 +119,21 @@ var all_racers: Array = []  # every racer car of the match, eliminated or not
 var cops: Array = []        # the AI cops (in cop mode your own police car is cops[0])
 var cop_mode: bool = false  # true = you drive the police car and bust the racers (set on the New Game page)
 var story: bool = false     # racer side, story mode: a place to reach per level, no points
+var time_trial: bool = false   # racer side, time trial: alone on one map, no cops, 3 laps, best times are saved
+var tt_laps_done: int = 0
+var tt_lap_start: float = 0.0
+var tt_lap_times: Array = []
+var tt_result: Dictionary = {}
+var pt_flag: bool = false   # ptest scratch flag
+var pt_air: float = 0.0
+var lbl_gear: Label
 var rules                   # rules.gd: points, eliminations, cop strikes, rankings (points modes)
 var rules_snap: Dictionary = {}   # rules state at the start of the level (for retries)
 var results_view            # results_view.gd
 var title_next: bool = false      # after the next load / leg start go to the main menu, not the countdown
 var built_leg: int = -1           # the level the current track was built for
 var start_leg: int = 0
+var base_leg: int = 0     # the first level of a normal match (a time trial overrides start_leg with its map)
 var wait_t: float = 0.0           # points race: seconds since your own race ended
 var target_racer = null     # cop mode: the racer closest to you (the arrest bar shows it)
 var finish_order: Array = []
@@ -159,6 +175,13 @@ var sky_mat: ProceduralSkyMaterial
 var sun: DirectionalLight3D
 var wind: CPUParticles3D
 var sfx: Dictionary = {}
+var bgm_a: AudioStreamPlayer      # background music (Kenney Music Loops, CC0)
+var bgm_b: AudioStreamPlayer      # the same idea, faster: fades in above HYPE_SPEED
+var hype: float = 0.0             # 0 = normal music, 1 = hype music
+const HYPE_SPEED: float = 150.0   # km/h: above this the hype music takes over (it drops back below HYPE_SPEED - 15)
+const BGM_DB: float = -9.0
+const HYPE_HOLD: float = 3.0       # seconds above HYPE_SPEED before the hype music starts
+var hype_fast_t: float = 0.0
 var warn_t: float = 0.0
 var last_beep: int = -1
 
@@ -184,8 +207,15 @@ var lbl_time: Label
 var lbl_cop: Label
 var lbl_board: Label
 var lbl_speed: Label
+var nfill: StyleBoxFlat
+var menu_shot_done: bool = false
+var hud_sig: String = ""       # the HUD style settings last applied (re-applied when they change)
+var gauge_speed: Control
+var gauge_rpm: Control
+const GAUGE_SIZE: float = 190.0
 var lbl_arrest: Label
 var lbl_msg: Label
+var tl: VBoxContainer
 var lbl_sub: Label
 var lbl_ver: Label
 var bar: ProgressBar
@@ -221,6 +251,7 @@ func _ready() -> void:
 	if tune.has("leg"):
 		leg = clampi(int(tune["leg"]), 0, LEGS.size() - 1)
 	start_leg = leg
+	base_leg = leg
 
 	rules = RulesScript.new()
 	results_view = ResultsScript.new()
@@ -243,6 +274,7 @@ func _ready() -> void:
 	_make_track()
 
 	# The start-up calibration car: always a getaway car. _build_field() replaces it with the real field.
+	CarModelScript.selected = String(menu.cfg["car_model"])
 	player = _new_car(0, menu.cfg["car_color"], 38.0, "YOU", GRID[PLAYER_SLOT][0], GRID[PLAYER_SLOT][1])
 	player.set_meta("slot", PLAYER_SLOT)
 	player.auto_drive = autotest
@@ -261,6 +293,7 @@ func _ready() -> void:
 	player.cam = cam
 	_build_wind()
 	_build_sfx()
+	_build_music()
 	_build_loading_ui()
 
 	_build_hud()
@@ -338,6 +371,8 @@ func _make_track() -> void:
 	_set_laps()
 	for c in all_racers + cops:
 		c.track = track
+	if player != null:
+		player.track = track   # cop mode: your car is in neither list until _start_leg()
 	if minimap != null:
 		minimap.setup(track)
 
@@ -345,7 +380,7 @@ func _make_track() -> void:
 ## Laps of the current level (the cop modes run longer levels: there is more time to catch the racers).
 func _set_laps() -> void:
 	var table: Array = COP_LEGS if cop_mode else LEGS
-	laps = int(table[leg][0])
+	laps = TT_LAPS if time_trial else int(table[leg][0])
 	total_progress = float(laps * track.count)
 
 
@@ -386,6 +421,49 @@ func _build_sfx() -> void:
 		p.volume_db = -12.0
 		add_child(p)
 		sfx[n] = p
+
+
+func _build_music() -> void:
+	bgm_a = _music_player("res://Resources/Music/bgm_normal.ogg")
+	bgm_b = _music_player("res://Resources/Music/bgm_hype.ogg")
+	bgm_b.volume_db = -80.0
+	if bgm_a.stream != null:
+		bgm_a.play()
+	if bgm_b.stream != null:
+		bgm_b.play()
+
+
+func _music_player(path: String) -> AudioStreamPlayer:
+	var pl := AudioStreamPlayer.new()
+	var st = load(path) if ResourceLoader.exists(path) else null
+	if st is AudioStreamOggVorbis:
+		st.loop = true
+	pl.stream = st
+	pl.volume_db = BGM_DB
+	add_child(pl)
+	return pl
+
+
+## Normal music always; above 150 km/h it crossfades to the faster hype track (and back, with a little hysteresis).
+func _update_music(delta: float) -> void:
+	if bgm_a == null:
+		return
+	var kmh: float = 0.0
+	if player != null and state == State.RACING:
+		kmh = player.linear_velocity.length() * 3.6
+	if kmh > HYPE_SPEED:
+		hype_fast_t += delta
+	else:
+		hype_fast_t = 0.0
+	var want: float = hype
+	if hype_fast_t >= HYPE_HOLD:
+		want = 1.0
+	elif kmh < HYPE_SPEED - 15.0:
+		want = 0.0
+	hype = move_toward(hype, want, delta * 1.2)
+	var on: bool = bool(menu.cfg.get("music", true))
+	bgm_a.volume_db = BGM_DB + linear_to_db(maxf(1.0 - hype, 0.0001)) if on else -80.0
+	bgm_b.volume_db = BGM_DB + 1.5 + linear_to_db(maxf(hype, 0.0001)) if on else -80.0
 
 
 func _play(n: String) -> void:
@@ -461,7 +539,7 @@ func _build_hud() -> void:
 	markers.racers = racers
 	hud.add_child(markers)
 
-	var tl := VBoxContainer.new()
+	tl = VBoxContainer.new()
 	tl.position = Vector2(22, 14)
 	hud.add_child(tl)
 	lbl_lap = _label(tl, 36)
@@ -478,8 +556,22 @@ func _build_hud() -> void:
 	bottom = VBoxContainer.new()
 	bottom.custom_minimum_size = Vector2(460, 0)
 	hud.add_child(bottom)
+	gauge_speed = GaugeScript.new()   # arcade dials: speed bottom left, revs + gear bottom right
+	gauge_speed.size = Vector2(GAUGE_SIZE, GAUGE_SIZE)
+	gauge_speed.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hud.add_child(gauge_speed)
+	gauge_rpm = GaugeScript.new()
+	gauge_rpm.size = Vector2(GAUGE_SIZE, GAUGE_SIZE)
+	gauge_rpm.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	gauge_rpm.vmax = 8000.0
+	gauge_rpm.major = 1000.0
+	gauge_rpm.label_div = 1000.0
+	gauge_rpm.red_from = 6800.0
+	hud.add_child(gauge_rpm)
 	lbl_speed = _label(bottom, 48)
 	lbl_speed.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl_gear = _label(bottom, 26, Color(1.0, 0.9, 0.5))
+	lbl_gear.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	lbl_arrest = _label(bottom, 22, Color(1.0, 0.45, 0.4))
 	lbl_arrest.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	bar = ProgressBar.new()
@@ -490,7 +582,9 @@ func _build_hud() -> void:
 	bar_fill = StyleBoxFlat.new()   # red for robbers, green for cops (see _apply_role_ui)
 	bar_fill.bg_color = Color(0.9, 0.15, 0.15)
 	var back := StyleBoxFlat.new()
-	back.bg_color = Color(0, 0, 0, 0.55)
+	back.bg_color = Color(0.03, 0.03, 0.05, 0.92)   # nearly opaque: road stripes must not show through the bars
+	back.set_border_width_all(2)
+	back.border_color = Color(0, 0, 0, 1)
 	bar.add_theme_stylebox_override("fill", bar_fill)
 	bar.add_theme_stylebox_override("background", back)
 	bottom.add_child(bar)
@@ -498,7 +592,7 @@ func _build_hud() -> void:
 	nbar.max_value = 1.0
 	nbar.show_percentage = false
 	nbar.custom_minimum_size = Vector2(460, 12)
-	var nfill := StyleBoxFlat.new()
+	nfill = StyleBoxFlat.new()
 	nfill.bg_color = Color(0.3, 0.7, 1.0)
 	nbar.add_theme_stylebox_override("fill", nfill)
 	nbar.add_theme_stylebox_override("background", back)
@@ -509,7 +603,7 @@ func _build_hud() -> void:
 	lbl_warn.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	hint = _label(hud, 17, Color(0.9, 0.9, 0.9))
-	hint.text = "W/S  gas / brake     A/D  steer     SPACE  drift (refills nitro)     SHIFT  nitro     R  reset     ESC  menu / help"
+	hint.text = "W/S  gas / brake     A/D  steer     SPACE+gas  drift (refills nitro)     SHIFT  nitro     R  reset     ESC  menu / help"
 
 	lbl_tip = _label(hud, 24, Color(0.55, 0.9, 1.0))
 	lbl_tip.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -531,17 +625,48 @@ func _build_hud() -> void:
 
 
 ## Place HUD pieces from the real window size (robust to resizing / web canvas).
+## HUD size setting (Settings > HUD): 0.5 .. 1.25 in the menu. Only the HUD blocks scale; the big centre messages and the name tags do not.
+func _menu_shot() -> void:
+	menu.open(String(tune["menupage"]))
+	if menu.settings_tabs != null:
+		menu.settings_tabs.current_tab = int(tune.get("tab", 0))
+	for i in range(8):
+		await get_tree().process_frame
+	get_viewport().get_texture().get_image().save_png("%s/menu_%s.png" % [tune.get("shotdir", "."), tune["menupage"]])
+	get_tree().quit()
+
+
+func _hud_scale() -> float:
+	return clampf(float(String(menu.cfg["hud_scale"])) / 100.0, 0.5, 1.5)
+
+
 func _layout_hud() -> void:
 	var vp: Vector2 = get_viewport().get_visible_rect().size
+	var hs: float = _hud_scale()
+	var hv := Vector2(hs, hs)
 	fx.size = vp
 	markers.size = vp
 	markers.active = cop_mode and state >= State.COUNTDOWN
-	minimap.position = Vector2(vp.x - minimap.custom_minimum_size.x - 16.0, 16.0)
+	tl.scale = hv
+	minimap.scale = hv
+	minimap.position = Vector2(vp.x - minimap.custom_minimum_size.x * hs - 16.0, 16.0)
 	bottom.size = Vector2(460, 0)
-	bottom.position = Vector2((vp.x - 460.0) * 0.5, vp.y - bottom.get_combined_minimum_size().y - 44.0)
-	hint.position = Vector2(16.0, vp.y - hint.get_combined_minimum_size().y - 12.0)
-	lbl_ver.position = Vector2(vp.x - lbl_ver.get_combined_minimum_size().x - 16.0, vp.y - 30.0)
+	bottom.scale = hv
+	hint.scale = hv
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.custom_minimum_size.x = (vp.x - 32.0) / hs
+	hint.size.x = (vp.x - 32.0) / hs
+	hint.position = Vector2(16.0, vp.y - hint.get_combined_minimum_size().y * hs - 12.0)
+	var bh: float = bottom.get_combined_minimum_size().y * hs
+	var bar_y: float = vp.y - bh - 44.0
+	var ver_y: float = vp.y - 30.0
+	if menu.cfg["controls"]:   # the version tag sits above the controls line, never over it; the bars stay above the line too
+		ver_y = hint.position.y - 30.0
+		bar_y = minf(bar_y, hint.position.y - bh - 6.0)
+	bottom.position = Vector2((vp.x - 460.0 * hs) * 0.5, bar_y)
+	lbl_ver.position = Vector2(vp.x - lbl_ver.get_combined_minimum_size().x - 16.0, ver_y)
 	lbl_msg.size = Vector2(vp.x, 120.0)
+	_fit_label(lbl_msg, vp.x - 40.0, 96)
 	lbl_msg.position = Vector2(0.0, vp.y * 0.36 - 60.0)
 	lbl_sub.size = Vector2(vp.x, 50.0)
 	lbl_sub.position = Vector2(0.0, vp.y * 0.36 + 70.0)
@@ -549,8 +674,46 @@ func _layout_hud() -> void:
 	lbl_warn.position = Vector2(0.0, vp.y * 0.16)
 	lbl_tip.size = Vector2(minf(vp.x - 40.0, 900.0), 70.0)
 	lbl_tip.position = Vector2((vp.x - lbl_tip.size.x) * 0.5, vp.y * 0.36 + 120.0)
+	var gs: float = clampf(hs, 0.6, 1.15)   # the dials grow with the HUD, but never into the middle bars
+	var gv := Vector2(gs, gs)
+	gauge_speed.scale = gv
+	gauge_rpm.scale = gv
+	var gy: float = ver_y - GAUGE_SIZE * gs - 4.0
+	gauge_speed.position = Vector2(14.0, gy)
+	gauge_rpm.position = Vector2(vp.x - GAUGE_SIZE * gs - 14.0, gy)
 	hint.visible = menu.cfg["controls"]
 	minimap.visible = menu.cfg["minimap"]
+	var sig: String = "%s|%s|%s" % [menu.cfg["hud_style"], menu.cfg["hud_opacity"], menu.cfg["dials"]]
+	if sig != hud_sig:
+		hud_sig = sig
+		_apply_hud_style()
+
+
+## HUD colours (Settings > HUD and menu colours) and opacity.
+func _apply_hud_style() -> void:
+	var st: Dictionary = menu.HUD_STYLES.get(String(menu.cfg["hud_style"]), menu.HUD_STYLES["classic"])
+	for l in [lbl_lap, lbl_time, lbl_speed]:
+		l.add_theme_color_override("font_color", st["text"])
+	lbl_board.add_theme_color_override("font_color", st["dim"])
+	hint.add_theme_color_override("font_color", st["dim"])
+	lbl_pos.add_theme_color_override("font_color", st["accent"])
+	lbl_gear.add_theme_color_override("font_color", st["accent"])
+	nfill.bg_color = st["nitro"]
+	gauge_speed.accent = st["dial"]
+	gauge_rpm.accent = st["dial"]
+	minimap.line_col = st["line"]
+	var a: float = clampf(float(String(menu.cfg["hud_opacity"])) / 100.0, 0.7, 1.0)
+	for c in [tl, minimap, bottom, hint, lbl_ver, gauge_speed, gauge_rpm]:
+		(c as CanvasItem).modulate.a = a
+
+
+## Shrink a label's font until its text fits the width (the big centre messages can be long).
+func _fit_label(l: Label, max_w: float, base: int) -> void:
+	var font: Font = l.get_theme_font("font")
+	var size: int = base
+	while size > 24 and font.get_string_size(l.text, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x > max_w:
+		size -= 4
+	l.add_theme_font_size_override("font_size", size)
 
 
 func _time_str(t: float) -> String:
@@ -578,11 +741,13 @@ func _standings() -> Array:
 
 
 func _update_hud() -> void:
-	if cop_mode:
+	if time_trial:
+		_update_tt_hud()
+	elif cop_mode:
 		_update_cop_hud()
 	else:
 		var lap: int = clampi(int(floorf(player.prog / float(track.count))) + 1, 1, laps)
-		lbl_lap.text = "LEVEL %d/%d  %s   LAP %d/%d" % [leg + 1, LEGS.size(), track.map["name"], lap, laps]
+		lbl_lap.text = "LEVEL %d/%d  %s   LAP %d/%d" % [leg + 1, CAMPAIGN_LEGS, track.map["name"], lap, laps]
 		var order: Array = _standings()
 		lbl_pos.text = "POSITION  %d / %d" % [order.find(player) + 1, order.size()]
 		if rules.active:
@@ -608,6 +773,14 @@ func _update_hud() -> void:
 		lbl_arrest.text = "ARREST  %d%%" % int(player.arrest)
 	var kmh: float = absf(player.forward_speed()) * 3.6
 	lbl_speed.text = ("%d mph" % int(kmh * 0.621)) if menu.cfg["mph"] else ("%d km/h" % int(kmh))
+	lbl_gear.text = _gear_text()
+	var dials: bool = bool(menu.cfg["dials"])
+	gauge_speed.visible = dials
+	gauge_rpm.visible = dials
+	lbl_speed.visible = not dials     # one gear / speed display at a time: the dials, or the text
+	lbl_gear.visible = not dials
+	if dials:
+		_update_gauges(kmh)
 	nbar.value = player.nitro
 	warn_t -= get_physics_process_delta_time()
 	if warn_t <= 0.0:
@@ -615,6 +788,70 @@ func _update_hud() -> void:
 	tip_t -= get_physics_process_delta_time()
 	if tip_t <= 0.0 and state != State.COUNTDOWN:
 		lbl_tip.text = ""
+
+
+## The two dials: speed (km/h or mph) and revs with the gear. The automatic fakes five gears so the needle still climbs and drops.
+func _update_gauges(kmh: float) -> void:
+	var mph: bool = bool(menu.cfg["mph"])
+	gauge_speed.vmax = 140.0 if mph else 220.0
+	gauge_speed.major = 20.0
+	gauge_speed.value = kmh * (0.621 if mph else 1.0)
+	gauge_speed.readout = ("%d MPH" % int(kmh * 0.621)) if mph else ("%d KM/H" % int(kmh))
+	var rev: float
+	var g: String
+	if player.manual_active():
+		rev = player.rpm_f
+		g = "R" if player.gear == -1 else ("N" if player.gear == 0 else str(player.gear))
+	else:
+		var ms: float = absf(player.forward_speed())
+		var band: float = maxf(player.top_speed, 1.0) / 5.0
+		var gi: int = clampi(int(ms / band), 0, 4)
+		rev = 0.25 + 0.75 * clampf((ms - float(gi) * band) / band, 0.0, 1.0) if ms > 0.5 else 0.15 + player.in_throttle * 0.3
+		g = str(gi + 1)
+		if player.forward_speed() < -0.5:
+			g = "R"
+	gauge_rpm.value = clampf(rev, 0.0, 1.0) * 8000.0
+	gauge_rpm.centre = g
+	gauge_rpm.readout = "RPM x1000"
+	if player.manual_active() and player.gear >= 1:
+		if player.gear < 6 and player.rpm_f > 0.9:
+			gauge_rpm.readout = "SHIFT UP  (E)"
+		elif player.gear >= 2 and player.rpm_f < 0.2 and player.in_throttle > 0.05:
+			gauge_rpm.readout = "SHIFT DOWN  (Q)"
+	gauge_speed.queue_redraw()
+	gauge_rpm.queue_redraw()
+
+
+## The gear and rev bar (manual mode only), with a hint when it is time to shift.
+func _gear_text() -> String:
+	if not player.manual_active():
+		return ""
+	var g: String = "R" if player.gear == -1 else ("N" if player.gear == 0 else str(player.gear))
+	var bars: int = int(round(clampf(player.rpm_f, 0.0, 1.0) * 10.0))
+	var hint_txt: String = ""
+	if player.gear >= 1 and player.gear < 6 and player.rpm_f > 0.9:
+		hint_txt = "   SHIFT UP (E)"
+	elif player.gear >= 2 and player.rpm_f < 0.2 and player.in_throttle > 0.05:
+		hint_txt = "   SHIFT DOWN (Q)"
+	return "GEAR %s   %s%s%s" % [g, "|".repeat(bars), ".".repeat(10 - bars), hint_txt]
+
+
+## Time trial HUD: laps, the clock, best times. No cops, no arrest bar.
+func _update_tt_hud() -> void:
+	var lap: int = clampi(tt_laps_done + 1, 1, laps)
+	lbl_lap.text = "TIME TRIAL  %s   LAP %d/%d" % [track.map["name"], lap, laps]
+	var rec: Dictionary = ScoresScript.get_map(String(track.map["name"]))
+	var best_total: String = ScoresScript.fmt(rec["top"][0]) if not (rec["top"] as Array).is_empty() else "--"
+	lbl_pos.text = "BEST  %s" % best_total
+	lbl_time.text = "TIME  " + _time_str(race_time)
+	lbl_cop.text = "LAP  " + _time_str(race_time - tt_lap_start)
+	lbl_cop.add_theme_color_override("font_color", Color.WHITE)
+	var board: String = ""
+	for i in range(tt_lap_times.size()):
+		board += "Lap %d   %s\n" % [i + 1, _time_str(tt_lap_times[i])]
+	lbl_board.text = board.strip_edges()
+	lbl_arrest.text = ""
+	bar.visible = false
 
 
 ## Cop mode: how many racers are busted / got away, the racer closest to you, and its arrest bar.
@@ -626,7 +863,7 @@ func _update_cop_hud() -> void:
 	var lap: int = laps
 	if lead != null:
 		lap = clampi(int(floorf(lead.prog / float(track.count))) + 1, 1, laps)
-	lbl_lap.text = "LEVEL %d/%d  %s   LEAD RACER LAP %d/%d" % [leg + 1, LEGS.size(), track.map["name"], lap, laps]
+	lbl_lap.text = "LEVEL %d/%d  %s   LEAD RACER LAP %d/%d" % [leg + 1, CAMPAIGN_LEGS, track.map["name"], lap, laps]
 	lbl_pos.text = "BUSTED  %d / %d     NEED  %d     YOUR PTS  %s" % [_count_busted(), racers.size(), rules.cop_required(), RulesScript.fmt(rules.cop_points("YOU"))]
 	lbl_time.text = "TIME  " + _time_str(race_time)
 	target_racer = null
@@ -669,6 +906,12 @@ func _update_cop_hud() -> void:
 func _physics_process(delta: float) -> void:
 	sim_time += delta
 	menu.can_pause = not autotest and ptest == "" and state >= State.COUNTDOWN
+	player.manual = String(menu.cfg["gearbox"]) == "manual"
+	player.drift_boost = bool(menu.cfg["drift_boost"])
+	if autotest and tune.has("menupage") and not menu_shot_done and state >= State.COUNTDOWN:   # test hook: screenshot a menu page
+		menu_shot_done = true
+		_menu_shot()
+	_update_music(delta)
 	if state < State.LOADING:   # start-up calibration fills the first part of the loading bar
 		load_bar.value = minf(15.0, load_bar.value + delta * 8.0)
 	match state:
@@ -690,6 +933,8 @@ func _physics_process(delta: float) -> void:
 			_state_results(delta)
 		State.FINAL:
 			_state_final(delta)
+		State.TT_DONE:
+			_state_tt_done(delta)
 		State.PTEST:
 			_state_ptest(delta)
 	if state != State.LOADING:
@@ -751,7 +996,7 @@ func _build_field() -> void:
 		return
 	if ptest == "" and not solo:
 		_spawn_field()
-	elif ptest != "":
+	elif ptest != "" and ptest != "jump":   # (the jump test needs the ramp, which lives in the Walls body)
 		track.get_node("Walls").queue_free()
 	_start_leg()
 	if ptest != "":
@@ -772,6 +1017,7 @@ func _spawn_field() -> void:
 	if cop_mode:
 		player = _new_car(3, Color.WHITE, 38.0, "YOU", COP_PLAYER_SLOT[0], COP_PLAYER_SLOT[1])
 	else:
+		CarModelScript.selected = String(menu.cfg["car_model"])
 		player = _new_car(0, menu.cfg["car_color"], 38.0, "YOU", GRID[PLAYER_SLOT][0], GRID[PLAYER_SLOT][1])
 		player.set_meta("slot", PLAYER_SLOT)
 		all_racers.append(player)
@@ -781,7 +1027,7 @@ func _spawn_field() -> void:
 	markers.me = player
 	var specs: Array = COP_ROBBERS if cop_mode else ROBBERS
 	var slots: Array = COP_AI_SLOTS if cop_mode else AI_SLOTS
-	for k in range(specs.size()):
+	for k in range(0 if time_trial else specs.size()):
 		var spec: Array = specs[k]
 		var slot: Array = GRID[slots[k]]
 		var ai = _new_car(1, spec[1], spec[2], spec[0], slot[0], slot[1])
@@ -795,6 +1041,7 @@ func _spawn_field() -> void:
 
 ## The pause menu closed (Garage): a new car colour repaints your car (and its minimap dot) at once.
 func _on_menu_closed() -> void:
+	_apply_role_ui()   # the controls hint depends on the transmission setting
 	if player != null and not cop_mode:
 		player.set_body_color(menu.cfg["car_color"])
 		_refresh_minimap()
@@ -803,13 +1050,15 @@ func _on_menu_closed() -> void:
 ## Everything on screen that depends on the role: the controls line, the arrest bar colour, the tags over the racers.
 func _apply_role_ui() -> void:
 	if cop_mode:
-		hint.text = "W/S  gas / brake     A/D  steer     SPACE  drift (refills nitro)     SHIFT  nitro     F  siren sound     R  reset     G  garage     ESC  menu / help"
+		hint.text = "W/S  gas / brake     A/D  steer     SPACE+gas  drift (refills nitro)     SHIFT  nitro     F  siren sound     R  reset     G  garage     ESC  menu / help"
 		bar_fill.bg_color = Color(0.2, 0.8, 0.35)
 		lbl_arrest.add_theme_color_override("font_color", Color(0.55, 1.0, 0.6))
 	else:
-		hint.text = "W/S  gas / brake     A/D  steer     SPACE  drift (refills nitro)     SHIFT  nitro     R  reset     G  garage     ESC  menu / help"
+		hint.text = "W/S  gas / brake     A/D  steer     SPACE+gas  drift (refills nitro)     SHIFT  nitro     R  reset     G  garage     ESC  menu / help"
 		bar_fill.bg_color = Color(0.9, 0.15, 0.15)
 		lbl_arrest.add_theme_color_override("font_color", Color(1.0, 0.45, 0.4))
+	if String(menu.cfg["gearbox"]) == "manual":
+		hint.text += "     Q/E  shift down / up"
 	markers.active = cop_mode
 
 
@@ -876,7 +1125,7 @@ func _start_leg() -> void:
 	cops.clear()
 	if cop_mode:
 		cops.append(player)
-	if ptest == "" and not OS.get_cmdline_user_args().has("solo"):
+	if ptest == "" and not OS.get_cmdline_user_args().has("solo") and not time_trial:
 		var backup: int = int(COP_LEGS[leg][1]) if cop_mode else int(LEGS[leg][1])
 		for k in range(backup):
 			var cop = _new_car(2, Color.WHITE, LEGS[leg][2], "COP %d" % (k + 1), COP_GRID[k][0], COP_GRID[k][1])
@@ -959,6 +1208,10 @@ func _begin_countdown() -> void:
 	stuck_t = 0.0
 	last_prog = player.prog
 	wait_t = 0.0
+	tt_laps_done = 0
+	tt_lap_start = 0.0
+	tt_lap_times.clear()
+	bar.visible = not time_trial
 	hud.visible = true
 	results_view.hide_screen()
 	var tips: Array = COP_TIPS if cop_mode else TIPS
@@ -966,6 +1219,9 @@ func _begin_countdown() -> void:
 		tips = POINTS_TIPS
 	var tip: String = ("TIP: " + tips[randi() % tips.size()]) if menu.cfg["tips"] else ""
 	var rule: String = rules.rules_line() if rules.active else _story_line()
+	if time_trial:
+		rule = "TIME TRIAL: %d laps alone on the road, no cops. Your best times are saved." % TT_LAPS
+		tip = ""
 	lbl_tip.text = (rule + "\n" + tip).strip_edges()
 	lbl_msg.add_theme_color_override("font_color", Color(1, 0.95, 0.5))
 	cam_dir = player.forward_world()
@@ -1027,15 +1283,24 @@ func _goto_leg(i: int, fresh: bool) -> void:
 func _begin_match() -> void:
 	cop_mode = String(menu.cfg["role"]) == "cop"
 	var mode: String = String(menu.cfg["mode"])
+	time_trial = (not cop_mode) and mode == "timetrial" and not autotest
+	if autotest and tune.has("tt"):   # tests: tt=<map number> drives a time trial
+		time_trial = true
+		cop_mode = false
+		start_leg = clampi(int(tune["tt"]), 0, TrackScript.MAPS.size() - 1)
 	if autotest:   # tests: role=cop / mode=points / elim_last=1 ... on the command line (default: the story rules)
 		cop_mode = String(tune.get("role", "robber")) == "cop"
 		mode = String(tune.get("mode", "points" if cop_mode else "story"))
-	story = (not cop_mode) and mode == "story"
+	story = (not cop_mode) and mode == "story" and not time_trial
+	if time_trial and not tune.has("tt"):
+		start_leg = clampi(int(menu.cfg["tt_map"]), 0, TrackScript.MAPS.size() - 1)
+	elif not time_trial:
+		start_leg = base_leg   # a time trial on a later map must not leak into the next normal match
 	title_next = false
 	_apply_role_ui()
 	_spawn_field()
 	rules.reset()
-	if not story:
+	if not story and not time_trial:
 		rules.start_match(_match_config(), _racer_specs())
 	results_view.hide_screen()
 	_goto_leg(start_leg, true)
@@ -1105,6 +1370,7 @@ func _enter_title() -> void:
 func _to_title() -> void:
 	rules.reset()
 	story = false
+	time_trial = false
 	cop_mode = String(menu.cfg["role"]) == "cop"
 	title_next = true
 	results_view.hide_screen()
@@ -1126,10 +1392,12 @@ func _state_countdown(delta: float) -> void:
 			last_beep = n
 			_play("beep")
 		lbl_msg.text = str(n)
-		if cop_mode:
-			lbl_sub.text = "LEVEL %d/%d  %s  (%s)   %d laps, %d racers: bust at least %d" % [leg + 1, LEGS.size(), track.map["name"], track.map["time"], laps, racers.size(), rules.cop_required()]
+		if time_trial:
+			lbl_sub.text = "TIME TRIAL  %s  (%s)   %d laps" % [track.map["name"], track.map["time"], laps]
+		elif cop_mode:
+			lbl_sub.text = "LEVEL %d/%d  %s  (%s)   %d laps, %d racers: bust at least %d" % [leg + 1, CAMPAIGN_LEGS, track.map["name"], track.map["time"], laps, racers.size(), rules.cop_required()]
 		else:
-			lbl_sub.text = "LEVEL %d/%d  %s  (%s)   %d laps, %d racers, %d cops" % [leg + 1, LEGS.size(), track.map["name"], track.map["time"], laps, racers.size(), cops.size()]
+			lbl_sub.text = "LEVEL %d/%d  %s  (%s)   %d laps, %d racers, %d cops" % [leg + 1, CAMPAIGN_LEGS, track.map["name"], track.map["time"], laps, racers.size(), cops.size()]
 	else:
 		_play("beep_go")
 		state = State.RACING
@@ -1151,14 +1419,19 @@ func _state_racing(delta: float) -> void:
 	timer += delta
 	if timer > 1.2:
 		lbl_msg.text = ""
+	if time_trial:
+		_tt_laps()
 	_update_pace()
 	_update_cop_targets(delta)
 	_update_arrests(delta)
 	_update_obstacles(delta)
 	_update_finishes()
 	_check_level_end(delta)
-	if player.on_dirt and warn_t <= 0.0:
-		_warn("SHORTCUT  -  loose dirt", 0.5)
+	if warn_t <= 0.0:
+		if player.on_verge:
+			_warn("OFF ROAD  -  the dirt slows you down", 0.5)
+		elif player.on_cut:
+			_warn("SHORTCUT  -  loose dirt", 0.5)
 	_update_tips(delta)
 
 
@@ -1181,7 +1454,7 @@ func _update_tips(delta: float) -> void:
 		_tip("stuck", "Stuck? Press R to put your car back on the road.")
 	elif cop_mode:
 		if player.nitro < 0.05:
-			_tip("nitro_out", "Out of nitro. Drift (hold SPACE while turning) to refill it fast.")
+			_tip("nitro_out", "Out of nitro. Drift (hold SPACE with the gas on) to refill it fast.")
 		elif not used_nitro and race_time > 12.0 and player.nitro > 0.95:
 			_tip("nitro", "Your nitro is full (blue bar). Press SHIFT to catch up with the racers!")
 	elif player.arrest > 25.0 and nearest_cop < 14.0:
@@ -1189,7 +1462,7 @@ func _update_tips(delta: float) -> void:
 	elif player.spiked_t > 0.0:
 		_tip("spikes", "Spikes popped your tyres! Grip comes back in a few seconds. Avoid the flashing strips.")
 	elif player.nitro < 0.05:
-		_tip("nitro_out", "Out of nitro. Drift (hold SPACE while turning) to refill it fast.")
+		_tip("nitro_out", "Out of nitro. Drift (hold SPACE with the gas on) to refill it fast.")
 	elif not used_nitro and race_time > 12.0 and player.nitro > 0.95:
 		_tip("nitro", "Your nitro is full (blue bar). Press SHIFT for a speed boost!")
 
@@ -1319,7 +1592,10 @@ func _update_finishes() -> void:
 			continue
 		r.finished = true
 		finish_order.append(r)
-		if cop_mode:
+		if time_trial:
+			if r == player:
+				_tt_finish()
+		elif cop_mode:
 			_racer_leaves(r, "%s GOT AWAY!" % r.driver_name)
 		elif story:
 			if r == player:
@@ -1330,12 +1606,65 @@ func _update_finishes() -> void:
 			_racer_leaves(r, "%s FINISHED %s" % [r.driver_name, RulesScript.ordinal(finish_order.size())])
 
 
+## Time trial: log each lap as it is completed (called every racing frame, before the finish check).
+func _tt_laps() -> void:
+	var done: int = int(floorf(player.prog / float(track.count)))
+	while tt_laps_done < mini(done, laps):
+		var lt: float = race_time - tt_lap_start
+		tt_lap_times.append(lt)
+		tt_lap_start = race_time
+		tt_laps_done += 1
+		if tt_laps_done < laps:
+			var rec: Dictionary = ScoresScript.get_map(String(track.map["name"]))
+			var best: float = float(rec["best_lap"])
+			_warn("LAP %d   %s%s" % [tt_laps_done, _time_str(lt), "   BEST LAP!" if best <= 0.0 or lt < best else ""], 2.5)
+
+
+## Time trial: you crossed the line. Save the run and show it.
+func _tt_finish() -> void:
+	_tt_laps()
+	var best_lap: float = 9999.0
+	for t in tt_lap_times:
+		best_lap = minf(best_lap, float(t))
+	if autotest:   # tests must not touch the player's saved records
+		tt_result = {"rank": 0, "new_best_lap": false, "prev_total": 0.0}
+	else:
+		tt_result = ScoresScript.record(String(track.map["name"]), race_time, best_lap)
+	state = State.TT_DONE
+	timer = 0.0
+	player.controls_enabled = false
+	_play("escaped")
+	lbl_msg.add_theme_color_override("font_color", Color(0.5, 1, 0.5))
+	var head: String = "TIME  " + _time_str(race_time)
+	if int(tt_result["rank"]) == 1:
+		head += "   NEW RECORD!"
+	elif int(tt_result["rank"]) > 1:
+		head += "   #%d on this map" % int(tt_result["rank"])
+	lbl_msg.text = head
+	var laps_txt: String = ""
+	for i in range(tt_lap_times.size()):
+		laps_txt += "Lap %d %s    " % [i + 1, _time_str(tt_lap_times[i])]
+	lbl_sub.text = laps_txt + ("(new best lap)" if tt_result["new_best_lap"] else "")
+	var rec: Dictionary = ScoresScript.get_map(String(track.map["name"]))
+	var tops: String = ""
+	for i in range((rec["top"] as Array).size()):
+		tops += "%d. %s   " % [i + 1, ScoresScript.fmt(rec["top"][i])]
+	lbl_tip.text = "BEST TIMES:  %s\nENTER  =  try again      ESC  =  menu" % tops
+	tip_t = 999.0
+
+
+func _state_tt_done(delta: float) -> void:
+	timer += delta
+	if timer > 0.8 and (Input.is_physical_key_pressed(KEY_ENTER) or Input.is_physical_key_pressed(KEY_KP_ENTER)):
+		_restart()
+
+
 ## Story: you crossed the line. Good enough for this level's place? Then on to the next level, else retry.
 func _story_finish(place: int) -> void:
 	var lenient: bool = autotest and int(tune.get("strict", 0)) != 1   # the dev tests clear every level like before
 	if lenient or RulesScript.story_ok(leg, place):
 		_play("escaped")
-		_end_race(State.LEG_CLEAR if leg < LEGS.size() - 1 else State.ESCAPED, place)
+		_end_race(State.LEG_CLEAR if leg < CAMPAIGN_LEGS - 1 else State.ESCAPED, place)
 	else:
 		_play("busted")
 		_end_race(State.BUSTED, place)
@@ -1415,7 +1744,7 @@ func _finish_points_level() -> void:
 			running.append(r.driver_name)
 	var res: Dictionary = rules.finish_level(fin, running)
 	var scr: Dictionary = rules.level_screen(res)
-	var title: String = "LEVEL %d / %d  -  %s" % [leg + 1, LEGS.size(), track.map["name"]]
+	var title: String = "LEVEL %d / %d  -  %s" % [leg + 1, CAMPAIGN_LEGS, track.map["name"]]
 	var foot: String = "ENTER  =  final standings"
 	if not rules.over:
 		foot = "ENTER  =  next level:  %s" % TrackScript.MAPS[leg + 1]["name"]
@@ -1477,7 +1806,7 @@ func _end_race(result: int, place: int) -> void:
 		else:
 			lbl_msg.text = "TOO SLOW!"
 			lbl_sub.text = "You finished %s but needed the top %d.   Press ENTER to retry the level." % [ordinal, int(RulesScript.STORY_MAX_PLACE[leg])]
-			lbl_tip.text = "TIP: use nitro (SHIFT) on the straights, and drift (SPACE while turning) to refill it."
+			lbl_tip.text = "TIP: use nitro (SHIFT) on the straights, and drift (SPACE with the gas on) to refill it."
 		tip_t = 999.0
 	elif result == State.LEG_CLEAR:
 		lbl_msg.text = "LEVEL %d CLEAR" % (leg + 1)
@@ -1523,7 +1852,7 @@ func _warn(text: String, t: float = 2.0) -> void:
 func _update_obstacles(delta: float) -> void:
 	if obs_glow != null:
 		obs_glow.emission_energy_multiplier = 3.0 if int(race_time * 4.0) % 2 == 0 else 0.3
-	var every: float = LEGS[leg][5]
+	var every: float = 0.0 if time_trial else float(LEGS[leg][5])
 	if every > 0.0 and race_time > 8.0:
 		obs_t -= delta
 		if obs_t <= 0.0:
@@ -1671,8 +2000,8 @@ func _build_warm_rig() -> void:
 	omni.light_color = Color(1, 0.1, 0.1)
 	omni.position = Vector3(0, 1.4, 0)
 	warm_rig.add_child(omni)
-	if player.headlight != null:
-		var spot: SpotLight3D = player.headlight.duplicate()
+	if not player.headlights.is_empty():
+		var spot: SpotLight3D = player.headlights[0].duplicate()
 		spot.visible = true
 		spot.position = Vector3(0, 1.0, 6.0)
 		warm_rig.add_child(spot)
@@ -1700,6 +2029,7 @@ func _state_loading() -> void:
 		load_layer.visible = false
 		warmed_map = leg
 		load_bar.value = 0.0
+		_reset_grid()   # the cars ran physics while the camera toured: put everybody back on the grid
 		if autotest:
 			print("[loading] %d stops, done at t=%.2f" % [load_steps.size(), sim_time])
 		_after_load()
@@ -1807,7 +2137,9 @@ func _update_camera(delta: float) -> void:
 		cam.fov = 70.0
 		fx.intensity = 0.0
 		fx.boost = 0.0
-	var shake: float = (0.05 * sn * sn + 0.06 * fx.boost) if menu.cfg["shake"] else 0.0
+	var shake: float = (0.05 * sn * sn + 0.06 * fx.boost + 0.12 * player.kick) if menu.cfg["shake"] else 0.0
+	if menu.cfg["shake"]:
+		cam.fov += 5.0 * player.kick   # shifts and hits punch the view
 	cam.h_offset = randf_range(-1.0, 1.0) * shake
 	cam.v_offset = randf_range(-1.0, 1.0) * shake
 	if menu.cfg["speed_fx"]:
@@ -1850,6 +2182,46 @@ func _state_ptest(delta: float) -> void:
 	p.in_brake = 0.0
 	p.in_throttle = 1.0
 	var done: bool = false
+	if ptest == "jump":   # launch at the ramp jump of the current map at ps m/s; prints the flight
+		var sc: Dictionary = track.shortcuts[track.shortcuts.size() - 1]
+		var jp: PackedVector3Array = sc["pts"]
+		var jd: Vector3 = jp[jp.size() - 1] - jp[0]
+		jd.y = 0.0
+		jd = jd.normalized()
+		if not pt_flag:
+			pt_flag = true
+			p.teleport(p.spawn_transform(jp[0] + jd * 1.0 + Vector3(0, 0.35, 0), jd))
+			PhysicsServer3D.body_set_state(p.get_rid(), PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY, jd * pt_speed)
+		p.in_throttle = 1.0
+		if int(pt_t * 4.0) != int((pt_t - delta) * 4.0):
+			print("jump t=%4.2f along=%6.2f m  y=%5.2f  v=(%5.1f,%5.1f)  wheels=%d pitch=%5.1f deg  angv=%5.2f  kick=%.2f" % [pt_t, (p.global_position - jp[0]).dot(jd), p.global_position.y, p.linear_velocity.dot(jd), p.linear_velocity.y, p.wheels_in_contact(), rad_to_deg(asin(p.forward_world().y)), p.angular_velocity.length(), p.kick])
+		if pt_t > 9.0:
+			print("[ptest done]")
+			get_tree().quit()
+		return
+	if ptest == "reverse":   # stick shift at a standstill: S must select R, W must select 1st again
+		p.gear = 1
+		p.in_throttle = 0.0
+		p.in_brake = 1.0
+		var f1: Vector2 = p._manual_forces(0.016, 0.0)
+		print("reverse: hold S -> gear=%d force=%s" % [p.gear, str(f1)])
+		p.in_brake = 0.0
+		p.in_throttle = 1.0
+		var f2: Vector2 = p._manual_forces(0.016, 0.0)
+		print("reverse: hold W -> gear=%d force=%s" % [p.gear, str(f2)])
+		get_tree().quit()
+		return
+	if ptest == "gears":   # stick shift: floor it, upshift at the limiter, print speed and gear each second
+		p.auto_drive = false
+		p.manual = true
+		if p.gear >= 1 and p.gear < 6 and p.rpm_f > 0.93 and p.shift_t <= 0.0:
+			p._shift(1)
+		if int(pt_t * 2.0) != int((pt_t - delta) * 2.0):
+			print("gears t=%4.1f gear=%d rpm=%.2f speed=%5.1f m/s (%3d km/h) kick=%.2f" % [pt_t, p.gear, p.rpm_f, sp, int(sp * 3.6), p.kick])
+		if pt_t > 40.0:
+			print("[ptest done]")
+			get_tree().quit()
+		return
 	if pt_phase == 0:
 		if sp >= pt_speed or pt_t > 25.0:
 			pt_phase = 1
@@ -1888,6 +2260,19 @@ func _state_ptest(delta: float) -> void:
 				done = pt_phase_t > 2.0
 				if done:
 					print("hb_straight nitro=%.3f (started 0.500)" % p.nitro)
+			"tilt":   # a car thrown up at 45 degrees roll: how long until all four wheels are down again?
+				if not pt_flag:
+					pt_flag = true
+					pt_air = 0.0
+					p.global_rotate(p.forward_world().normalized(), deg_to_rad(45.0))
+					p.linear_velocity.y = 4.0
+				pt_air += delta
+				if p.wheels_in_contact() == 4 and pt_air > 0.3:
+					print("[tilt] all four wheels down after %.2f s, roll error %.2f" % [pt_air, (p.forward_world().cross(p.global_transform.basis.y)).y])
+					done = true
+				elif pt_air > 8.0:
+					print("[tilt] STILL NOT DOWN after 8 s, wheels %d" % p.wheels_in_contact())
+					done = true
 			"brake":
 				p.in_throttle = 0.0
 				p.in_brake = 1.0

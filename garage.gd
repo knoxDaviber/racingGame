@@ -26,6 +26,8 @@ var picker: ColorPicker
 var color_box: VBoxContainer
 var cop_note: Label
 var car_label: Label
+var car_btn: Button
+var swatch_btns: Array = []
 
 
 func setup(p_cfg: Dictionary) -> void:
@@ -59,6 +61,11 @@ func setup(p_cfg: Dictionary) -> void:
 	var right := VBoxContainer.new()
 	right.add_theme_constant_override("separation", 8)
 	add_child(right)
+	car_btn = Button.new()   # cycles the getaway car
+	car_btn.custom_minimum_size = Vector2(340, 44)
+	car_btn.add_theme_font_size_override("font_size", 20)
+	car_btn.pressed.connect(_next_car)
+	right.add_child(car_btn)
 	color_box = VBoxContainer.new()
 	color_box.add_theme_constant_override("separation", 8)
 	right.add_child(color_box)
@@ -95,6 +102,8 @@ func setup(p_cfg: Dictionary) -> void:
 
 ## Called each time the page opens: sync with cfg and put the right car on the turntable.
 func refresh() -> void:
+	CarModel.selected = String(cfg["car_model"])
+	_mark_swatch()
 	picker.color = cfg["car_color"]
 	_update_role_ui()
 	_rebuild_car()
@@ -195,15 +204,34 @@ func _stand_in(cop: bool, col: Color) -> void:
 
 
 # ------------------------------------------------------------------ the controls
+func _next_car() -> void:
+	var at: int = 0
+	for i in range(CarModel.PLAYER_CARS.size()):
+		if CarModel.PLAYER_CARS[i][0] == cfg["car_model"]:
+			at = i
+	cfg["car_model"] = CarModel.PLAYER_CARS[(at + 1) % CarModel.PLAYER_CARS.size()][0]
+	CarModel.selected = String(cfg["car_model"])
+	_rebuild_car()
+	_update_role_ui()
+
+
 func _update_role_ui() -> void:
 	var cop: bool = String(cfg["role"]) == "cop"
+	var cname: String = "TUNER"
+	for c in CarModel.PLAYER_CARS:
+		if c[0] == cfg["car_model"]:
+			cname = c[1]
+	car_btn.text = "Car:  %s   (click to change)" % cname
+	car_btn.visible = not cop
 	color_box.visible = not cop
 	cop_note.visible = cop
 	car_label.text = "POLICE CRUISER" if cop else "GETAWAY CAR"
 
 
+
 func _on_color(c: Color) -> void:
 	cfg["car_color"] = c
+	_mark_swatch()
 	if model != null:
 		model.set_paint_color(c)
 	elif box_mat != null:
@@ -226,7 +254,19 @@ func _swatch(c: Color) -> Button:
 		sb.border_color = Color(0, 0, 0, 0.6) if state == "normal" else Color(1, 1, 1, 0.95)
 		b.add_theme_stylebox_override(state, sb)
 	b.pressed.connect(_pick.bind(c))
+	swatch_btns.append([b, c])
 	return b
+
+
+## A white ring on the swatch that matches the current colour.
+func _mark_swatch() -> void:
+	var cur: Color = cfg["car_color"]
+	for e in swatch_btns:
+		var on: bool = (e[1] as Color).is_equal_approx(cur) or ((e[1] as Color).to_html(false) == cur.to_html(false))
+		for state in ["normal", "hover", "pressed", "focus"]:
+			var sb: StyleBoxFlat = (e[0] as Button).get_theme_stylebox(state) as StyleBoxFlat
+			sb.set_border_width_all(4 if on else 2)
+			sb.border_color = Color(1, 1, 1, 1) if on else (Color(0, 0, 0, 0.6) if state == "normal" else Color(1, 1, 1, 0.95))
 
 
 func _label(parent: Node, size: int, color: Color) -> Label:

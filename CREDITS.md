@@ -18,3 +18,8 @@ rear wheels, materials converted from specular-glossiness to metallic-roughness 
 - `engine_robber.ogg`, `engine_cop.ogg`: from "PSX Style Cars" by GGBot (https://ggbot.itch.io/), converted to mono.
 - `crash.ogg` (Impact Sounds) and `escaped.ogg` (Music Jingles): Kenney (www.kenney.nl), CC0.
 - `siren.ogg`, `skid.ogg`, `nitro.ogg`, `beep*.ogg`, `busted.ogg`: synthesized for this game (public domain).
+
+## More assets (Kenney, CC0, www.kenney.nl)
+- `Resources/Models/Cars/Kenney/`: Car Kit (race, race-future, sedan-sports, hatchback-sports), used for the AI racers.
+- `Resources/Smoke/`: Smoke Particles (white puffs), the drift tyre smoke.
+- `Resources/Music/`: Music Loops, "Time Driving" (normal) and "Alpha Dance" (sped up 12%, plays above 150 km/h).

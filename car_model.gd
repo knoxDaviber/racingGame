@@ -21,7 +21,25 @@ extends RefCounted
 # calls per car instead of 50-80. Re-run that tool after changing a .gltf, or point these at the .gltf.
 const COP_MODEL: String = "res://Resources/Models/Cars/PoliceCar/PoliceCar_baked.tscn"
 const ROBBER_MODEL: String = "res://Resources/Models/Cars/RacingCar/RacingCar_baked.tscn"          # player + AI robbers. "" = reuse the cop model (sirens off)
-const MODEL_BY_DRIVER: Dictionary = {}   # optional per-car override, e.g. {"YOU": "res://cars/sport.glb", "COP 2": "res://cars/swat.glb"}
+const KENNEY: String = "res://Resources/Models/Cars/Kenney/"   # Kenney Car Kit (CC0), unpainted: they keep their own colours
+const MODEL_BY_DRIVER: Dictionary = {}   # optional per-car override, e.g. {"COP 2": "res://cars/swat.glb"}
+## The getaway cars you can pick in the Garage: [id, name, model path ("" = the default tuner, repainted in your colour)].
+## The Kenney cars are repainted too (kenney_paint.gdshader changes just the body paint). The AI racers always drive the tuner.
+const PLAYER_CARS: Array = [
+	["tuner", "TUNER", ""],
+	["race", "RACER", KENNEY + "race.glb"],
+	["future", "FUTURE RACER", KENNEY + "race-future.glb"],
+	["sedan", "SPORTS SEDAN", KENNEY + "sedan-sports.glb"],
+	["hatch", "HOT HATCH", KENNEY + "hatchback-sports.glb"],
+]
+static var selected: String = "tuner"   # set from the saved choice (menu cfg "car_model") by main.gd and the Garage
+
+
+static func selected_path() -> String:
+	for c in PLAYER_CARS:
+		if c[0] == selected:
+			return c[2]
+	return ""
 
 const FIT_TO_HITBOX: bool = true         # scale each model to exactly the hitbox length (4.2 m). false = keep its own size
 const YAW_OFFSET_DEG: float = 0.0        # set to 180 if a car drives backwards (its F / B wheel names are swapped)
@@ -42,12 +60,13 @@ const SIREN_LIGHT_RANGE: float = 14.0
 # Leave the list empty to use the old rule instead (multiply every textured, non-glass, non-wheel material by the colour).
 const PAINT_MATERIALS: Array = ["material_4", "material_43", "material_49", "material_15", "material_19", "material_23", "material_27", "material_44"]
 const PAINT_SHADER: String = "res://Resources/Shaders/paint_recolor.gdshader"
+const KENNEY_SHADER: String = "res://Resources/Shaders/kenney_paint.gdshader"   # repaints the body paint of the Kenney cars
 const PAINT_METALLIC: float = 0.3      # how metallic / how rough the repainted body looks
 const PAINT_ROUGHNESS: float = 0.35
 # ==========================================================================
 
 const WHEEL_KEYS: Array = ["wheelfl", "wheelfr", "wheelbl", "wheelbr"]
-const WHEEL_ALIASES: Dictionary = {"wheelrl": "wheelbl", "wheelrr": "wheelbr"}   # R = rear also accepted
+const WHEEL_ALIASES: Dictionary = {"wheelrl": "wheelbl", "wheelrr": "wheelbr", "wheelfrontleft": "wheelfl", "wheelfrontright": "wheelfr", "wheelbackleft": "wheelbl", "wheelbackright": "wheelbr"}   # R = rear also accepted
 const SIREN_COLORS: Array = [["red", Color(1.0, 0.05, 0.05)], ["blue", Color(0.1, 0.25, 1.0)]]
 
 # shared by every car in the session
@@ -57,6 +76,7 @@ static var _auto_done: bool = false
 static var _auto_hint: String = ""       # why auto-find found nothing (shown to the user)
 static var _said: Dictionary = {}
 static var _rest: Dictionary = {}        # the physics rig's resting pose, measured once (see physics_tick)
+static var _kenney_shader: Shader = null
 static var _paint_shader: Shader = null  # paint_recolor.gdshader, loaded once
 static var _paint_shader_tried: bool = false
 
@@ -265,6 +285,13 @@ func _tint(root: Node, skip: Array, color: Color) -> int:
 			if not (base is BaseMaterial3D):
 				continue
 			var bm: BaseMaterial3D = base as BaseMaterial3D
+			if _is_kenney_material(bm):   # the shared palette material of the Kenney cars: body paint only
+				if not cache.has(base):
+					cache[base] = _kenney_repainted(bm, color)
+				if cache[base] != null:
+					mi.set_surface_override_material(si, cache[base])
+					done += 1
+				continue
 			if listed:
 				if not _is_listed_paint(bm):
 					continue
@@ -275,6 +302,24 @@ func _tint(root: Node, skip: Array, color: Color) -> int:
 			mi.set_surface_override_material(si, cache[base])
 			done += 1
 	return done
+
+
+static func _is_kenney_material(m: BaseMaterial3D) -> bool:
+	return m.resource_name.to_lower() == "colormap" and m.albedo_texture != null
+
+
+## The Kenney palette material with its body paint swapped for `color` (null if the shader is missing: factory paint stays).
+func _kenney_repainted(base: BaseMaterial3D, color: Color) -> Material:
+	if _kenney_shader == null and ResourceLoader.exists(KENNEY_SHADER):
+		_kenney_shader = load(KENNEY_SHADER) as Shader
+	if _kenney_shader == null:
+		return null
+	var sm := ShaderMaterial.new()
+	sm.shader = _kenney_shader
+	sm.set_shader_parameter("albedo_tex", base.albedo_texture)
+	sm.set_shader_parameter("paint_color", color)
+	paint_mats.append({"mat": sm, "base": base.albedo_color, "tex": true})
+	return sm
 
 
 ## True when the material's name is in PAINT_MATERIALS (case ignored).
@@ -431,6 +476,8 @@ func sync_wheels(pw: Array) -> void:
 # ============================ finding the model ============================
 static func _resolve_path(is_cop: bool, driver: String) -> String:
 	var p: String = String(MODEL_BY_DRIVER.get(driver, ""))
+	if p == "" and not is_cop and (driver == "YOU" or driver == "GARAGE"):
+		p = selected_path()
 	if p == "":
 		if is_cop:
 			p = COP_MODEL if COP_MODEL != "" else ROBBER_MODEL

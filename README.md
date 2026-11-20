@@ -43,8 +43,8 @@ Racers that finish their laps got away. Name tags float over the racers; the gre
 - **Obstacles** (levels 2-4): spike strips (shred your tyres for a few seconds; cops are immune) and barrel walls, dropped
   ahead of the leader or laid by a cop that got ahead. A warning pops up when one is coming.
 
-**Controls:** W/S gas & brake/reverse - A/D steer - SPACE handbrake drift - SHIFT nitro - R flip/reset - F siren sound (cop)
-- G Garage - ENTER skip ahead / retry a failed level / continue on the results screens.
+**Controls:** W/S gas & brake/reverse - A/D steer - SPACE+gas+steer drift (SPACE alone = handbrake) - SHIFT nitro - R flip/reset - F siren sound (cop)
+- Q/E shift down/up (manual transmission: Settings) - G Garage - ENTER skip ahead / retry a failed level / continue on the results screens.
 **ESC or P** = pause menu: Garage, How to play, Settings (volume, fullscreen, tips, controls bar, minimap, mph, speed effects,
 camera shake; saved to user://settings.cfg together with your last New Game choices and car colour), Retry level,
 Restart match, Main menu. In-race tips (cyan) explain what to do when you are stuck, going the wrong way, about to be
@@ -65,7 +65,9 @@ arrested or out of nitro.
 
 ## Tuning knobs
 - Handling: top of car.gd (GRIP_FRONT/REAR, HANDBRAKE_REAR_GRIP, STEER_RATE, DRIFT_SLIP, DRIFT_SLIP_EXTRA, MASS)
-- Handbrake / drift: HANDBRAKE_FORCE + HANDBRAKE_ENGINE (SPACE without steering = slow down), DRIFT_HOLD_GRIP
+- Handbrake / drift: HANDBRAKE_FORCE + HANDBRAKE_ENGINE (SPACE without gas/steering = slow down), DRIFT_HOLD_GRIP, DRIFT_CARRY
+- Manual gearbox: GEAR_TOP / GEAR_PULL / SHIFT_*_TIME in car.gd. Air control: AIR_GRAVITY, AIR_*_TORQUE. Verge: track.gd `verge_w` per map, VERGE_GRIP.
+- Ramp jump: JUMP_* in track.gd; maps can list `cuts` (control point numbers, `jump: true`) instead of automatic shortcuts.
 - Difficulty: main.gd LEGS (laps, cops, cop speed, start delay, obstacle rate, arrest rate per leg) and ROBBERS list
 - Points and scoring: rules.gd RACE_POINTS (10/7/4/2), LADDERS and FLAT_LADDER (cop points per bust in a strike),
   STORY_MAX_PLACE (story requirement per level); main.gd WAIT_AFTER_YOU (seconds the others get after your race is over)
@@ -94,7 +96,9 @@ arrested or out of nitro.
 ## Headless testing (optional)
 godot --headless --audio-driver Dummy --path . -- autotest [noarrest] [solo] [leg=0..3] [pspeed=30] [alat=12]
 godot --audio-driver Dummy --path . -- autotest leg=3 top=40 shots=5,20 shotdir=/tmp   (screenshots; top = view from above)
-godot --headless --path . -- autotest ptest=turn|drift|drift_long|brake|hb_straight ps=30
+godot --headless --path . -- autotest ptest=turn|drift|drift_long|brake|hb_straight|tilt|gears ps=30
+godot --headless --path . -- autotest perf ptest=jump leg=4 ps=30      (ramp jump; real-time physics)
+godot --headless --path . -- autotest noarrest tt=4                     (a time trial on map 4, played by the AI)
 godot --headless --audio-driver Dummy --path . -- autotest role=cop mode=points elim_last=1 elim_busted=0 ending=survival scale=scaled share=own
 	(a whole points match played by the AI; tests ignore the saved menu choices and print the rankings at the end.
 	 Without role/mode a test plays the story rules like before: role=robber mode=points tests the racer points race)
