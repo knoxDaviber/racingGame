@@ -238,15 +238,17 @@ var used_nitro: bool = false
 
 
 func _ready() -> void:
-	autotest = OS.get_cmdline_user_args().has("autotest")
-	if autotest and not OS.get_cmdline_user_args().has("perf"):   # perf = real time, for frame timing
+	print("[boot] _ready start %d ms" % Time.get_ticks_msec())
+	get_viewport().disable_3d = true   # first frames: loading card only, no 3D draw (it compiled every shader in one 28 s web freeze)
+	autotest = _uargs().has("autotest")
+	if autotest and not _uargs().has("perf"):   # perf = real time, for frame timing
 		Engine.time_scale = 4.0
-	if OS.get_cmdline_user_args().has("perf"):
+	if _uargs().has("perf"):
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)   # uncapped fps = real cost
 	tune = _tuning_args()
 	ptest = String(tune.get("ptest", ""))
 	pt_speed = float(tune.get("ps", 25.0))
-	no_arrest = OS.get_cmdline_user_args().has("noarrest")
+	no_arrest = _uargs().has("noarrest")
 	_build_world()
 	if tune.has("leg"):
 		leg = clampi(int(tune["leg"]), 0, LEGS.size() - 1)
@@ -267,7 +269,7 @@ func _ready() -> void:
 	cop_mode = String(menu.cfg["role"]) == "cop"
 	if autotest or tune.has("role"):   # tests don't depend on the saved setting: add role=cop to test cop mode
 		cop_mode = String(tune.get("role", "robber")) == "cop"
-	if ptest != "" or OS.get_cmdline_user_args().has("solo"):
+	if ptest != "" or _uargs().has("solo"):
 		cop_mode = false
 	title_next = not autotest and ptest == ""   # tests start a match right away
 	story = autotest or ptest != ""             # tests use the story rules unless they ask for role=cop / mode=points
@@ -294,6 +296,7 @@ func _ready() -> void:
 	_build_wind()
 	_build_sfx()
 	_build_music()
+	print("[boot] pre-loading-ui %d ms" % Time.get_ticks_msec())
 	_build_loading_ui()
 
 	_build_hud()
@@ -990,7 +993,7 @@ func _state_test(delta: float) -> void:
 
 ## 3) spawn the rest of the field and put everyone on the grid
 func _build_field() -> void:
-	var solo: bool = OS.get_cmdline_user_args().has("solo")
+	var solo: bool = _uargs().has("solo")
 	if autotest and ptest == "" and not solo:
 		_begin_match()   # tests start a match right away (no main menu); this builds the field too
 		return
@@ -1125,7 +1128,7 @@ func _start_leg() -> void:
 	cops.clear()
 	if cop_mode:
 		cops.append(player)
-	if ptest == "" and not OS.get_cmdline_user_args().has("solo") and not time_trial:
+	if ptest == "" and not _uargs().has("solo") and not time_trial:
 		var backup: int = int(COP_LEGS[leg][1]) if cop_mode else int(LEGS[leg][1])
 		for k in range(backup):
 			var cop = _new_car(2, Color.WHITE, LEGS[leg][2], "COP %d" % (k + 1), COP_GRID[k][0], COP_GRID[k][1])
@@ -1160,6 +1163,7 @@ func _start_leg() -> void:
 	if ptest == "" and warmed_map != leg and DisplayServer.get_name() != "headless":   # headless draws no frames
 		_begin_loading()
 	else:
+		get_viewport().disable_3d = false
 		load_layer.visible = false
 		_after_load()
 
@@ -1922,6 +1926,7 @@ func _spawn_obstacle() -> void:
 ## camera visits the whole road and every shortcut once with a rig of the things that only show up later
 ## (obstacles, a siren light, the headlight, nitro flames), one stop per drawn frame.
 func _begin_loading() -> void:
+	get_viewport().disable_3d = false
 	state = State.LOADING
 	load_i = 0
 	load_frame = -1
@@ -2042,6 +2047,9 @@ func _state_loading() -> void:
 
 ## perf runs: report any frame over 50 ms, so no freeze goes unnoticed
 func _process(_d: float) -> void:
+	if not _boot_logged:
+		_boot_logged = true
+		print("[boot] first _process %d ms" % Time.get_ticks_msec())
 	if not autotest or Engine.time_scale != 1.0:
 		return
 	var now: int = Time.get_ticks_usec()
@@ -2109,6 +2117,8 @@ func _obs_mat(c: Color) -> StandardMaterial3D:
 	if not obs_mats.has(c):
 		var m := StandardMaterial3D.new()
 		m.albedo_color = c
+		if OS.has_feature("web"):
+			m.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX   # smaller web shader (see notes: godot-web-performance)
 		obs_mats[c] = m
 	return obs_mats[c]
 
@@ -2157,7 +2167,7 @@ func _update_camera(delta: float) -> void:
 ## Headless test only:  godot --headless --path . -- autotest alat=12 noarrest ptest=drift ps=30
 func _tuning_args() -> Dictionary:
 	var d: Dictionary = {}
-	for a in OS.get_cmdline_user_args():
+	for a in _uargs():
 		if a.contains("="):
 			var kv: PackedStringArray = a.split("=")
 			d[kv[0]] = kv[1]
@@ -2295,7 +2305,7 @@ func _autotest_log(delta: float) -> void:
 				get_viewport().get_texture().get_image().save_png("%s/shot_%s.png" % [tune.get("shotdir", "."), s])
 	if state == State.PTEST:
 		return
-	if OS.get_cmdline_user_args().has("perf") and int(sim_time * 2.0) != int((sim_time - delta) * 2.0):
+	if _uargs().has("perf") and int(sim_time * 2.0) != int((sim_time - delta) * 2.0):
 		print("PERF t=%.1f idx=%d fps=%d frame=%.1fms phys=%.1fms draws=%d prims=%dk objs=%d cop=%d" % [sim_time, player.idx, Engine.get_frames_per_second(), Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0, Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0, Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME), int(Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME) / 1000.0), Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME), int(nearest_cop)])
 	if tune.has("trace") and state == State.RACING and player.idx >= int(tune["trace"]) and player.idx <= int(tune["trace"]) + 24:
 		pt_log_t += delta
@@ -2315,7 +2325,7 @@ func _autotest_log(delta: float) -> void:
 		for c in cops:
 			s += " | cop %4.1f" % c.linear_velocity.length()
 		print(s)
-	if (state == State.BUSTED or state == State.ESCAPED) and OS.get_cmdline_user_args().has("restarttest") and lap_marks.size() < 90:
+	if (state == State.BUSTED or state == State.ESCAPED) and _uargs().has("restarttest") and lap_marks.size() < 90:
 		lap_marks.resize(99)  # only do this once
 		var t0: int = Time.get_ticks_msec()
 		_restart()
@@ -2331,3 +2341,13 @@ func _autotest_log(delta: float) -> void:
 		if rules.active:
 			print("[autotest] points ranking: ", rules.points_ranking(), "  cops by points: ", rules.cop_board_points())
 		get_tree().quit()
+
+
+## Dev args: command line natively, `?args=autotest+perf+leg=3` in the web build.
+func _uargs() -> PackedStringArray:
+	if OS.has_feature("web"):
+		var q = JavaScriptBridge.eval("new URLSearchParams(location.search).get('args') || ''")
+		return PackedStringArray(str(q).split(" ", false))
+	return OS.get_cmdline_user_args()
+
+var _boot_logged: bool = false

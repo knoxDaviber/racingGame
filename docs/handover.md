@@ -70,3 +70,12 @@ Mini-turbo is stronger and faster: tiers 0.55/1.2/2.0 s, boost 1.0/1.6/2.4 s, in
 Kenney garage cars are repaintable (Resources/Shaders/kenney_paint.gdshader repaints palette block cols 3/6/7 of row 1 only).
 Needs a human: the settings tabs look (never seen on screen), HUD 140% in a 720p window crowds the left board, boost strength.
 Not done: menu size scaling, a Redline-Rumble style top-centre position readout.
+
+## 2026-11-20 (web build): lag pass
+Applied note godot-web-performance: web-only PER_VERTEX shading on the common materials (track.gd `_mat`, car.gd `_paint` + wheel, main.gd `_obs_mat`); loading-screen prewarm and baked cars were already in. Re-exported `browser/` (index.html). Not run in a real browser yet.
+Next: test in Chrome/Edge (first-visit freezes, Night City with cops); if still stuttery, normalise remaining material flags (cull/filter) to cut distinct shaders.
+
+## 2026-11-20 (web playtest, headless Edge d3d11, no shader cache)
+Dev args now work in the web build via URL: `index.html?args=autotest+perf+noarrest+leg=4` (main.gd `_uargs()`); run with the recipe in notes/godot-web-performance.md.
+Found: the first rendered frame compiled every shader at once = 23-28 s black freeze at boot (script/boot is only ~0.7 s). Fixed: `get_viewport().disable_3d = true` until `_begin_loading` (or the skip branch), so only the loading card draws first; boot hitch now 0.15 s and the per-frame loading tour does the compiling. No compile hitches mid-race on leg 1 or 4 after loading.
+fps in the runs was noisy (a Music-Video-Maker render was using the PC); per-vertex shading already in. Further shader-flag cuts not needed yet; re-measure total time to first playable on a quiet PC.

@@ -313,6 +313,8 @@ func _mat(color: Color, rough: float = 0.9) -> StandardMaterial3D:
 	m.albedo_color = color
 	m.roughness = rough
 	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if OS.has_feature("web"):
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX   # smaller web shader (see notes: godot-web-performance)
 	return m
 
 

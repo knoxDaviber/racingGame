@@ -230,6 +230,8 @@ func _add_wheel(pos: Vector3) -> VehicleWheel3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_color = Color(0.05, 0.05, 0.05)
 	m.roughness = 0.9
+	if OS.has_feature("web"):
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX   # smaller web shader (see notes: godot-web-performance)
 	mi.material_override = m
 	w.add_child(mi)
 	# a light-coloured hub so you can see the wheel spinning
@@ -260,6 +262,8 @@ func _paint(color: Color, metallic: float, rough: float) -> StandardMaterial3D:
 	m.albedo_color = color
 	m.metallic = metallic
 	m.roughness = rough
+	if OS.has_feature("web"):
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_PER_VERTEX   # smaller web shader (see notes: godot-web-performance)
 	return m
 
 
